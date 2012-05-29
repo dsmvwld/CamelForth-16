@@ -1,0 +1,2659 @@
+0000                	   1 ; Listing 2.
+0000                	   2 ; ===============================================
+0000                	   3 ; CamelForth for the Mojang DCPU-16 (http://0x10c.com)
+0000                	   4 ; Copyright (c) 2012 Helge Horch
+0000                	   5 ; CamelForth for the Zilog Z80
+0000                	   6 ; Copyright (c) 1994,1995 Bradford J. Rodriguez
+0000                	   7 ;
+0000                	   8 ; This program is free software; you can redistribute it and/or modify
+0000                	   9 ; it under the terms of the GNU General Public License as published by
+0000                	  10 ; the Free Software Foundation; either version 3 of the License, or
+0000                	  11 ; (at your option) any later version.
+0000                	  12 ;
+0000                	  13 ; This program is distributed in the hope that it will be useful,
+0000                	  14 ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+0000                	  15 ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+0000                	  16 ; GNU General Public License for more details.
+0000                	  17 ;
+0000                	  18 ; You should have received a copy of the GNU General Public License
+0000                	  19 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+0000                	  20 
+0000                	  21 ; Commercial inquiries should be directed to the author at 
+0000                	  22 ; 115 First St., #105, Collingwood, Ontario L9Y 4W3 Canada
+0000                	  23 ; or via email to bj@camelforth.com
+0000                	  24 ;
+0000                	  25 ; ===============================================
+0000                	  26 ; CAMEL16.S: Code Primitives
+0000                	  27 ;   Source code is for the ASM assembler.
+0000                	  28 ;   Forth words are documented as follows:
+0000                	  29 ;x   NAME     stack -- stack    description
+0000                	  30 ;   where x=C for ANS Forth Core words, X for ANS
+0000                	  31 ;   Extensions, Z for internal or private words.
+0000                	  32 ;
+0000                	  33 ; Direct-Threaded Forth model for DCPU-16
+0000                	  34 ; 16 bit cell, 16 bit char, 16 bit (word) adrs unit
+0000                	  35 ;    DCPU-16 B = Forth TOS (top Param Stack item)
+0000                	  36 ;            C =       W    working register
+0000                	  37 ;            Z =       IP   Interpreter Pointer
+0000                	  38 ;           SP =       PSP  Param Stack Pointer
+0000                	  39 ;            X =       RSP  Return Stack Pointer
+0000                	  40 ;            Y =       UP   User area Pointer
+0000                	  41 ;      A, I, J =       temporaries
+0000                	  42 ;
+0000                	  43 ; Revision history:
+0000                	  44 ;   07 Apr 12 v0.1  cloned from Z80 CamelForth
+0000                	  45 ; ===============================================
+0000                	  46 ; Macros to define Forth headers
+0000                	  47 ; HEAD  label,name,action
+0000                	  48 ; IMMED label,name,action
+0000                	  49 ;    label  = assembler name for this word
+0000                	  50 ;             (special characters not allowed)
+0000                	  51 ;    name   = Forth's name for this word
+0000                	  52 ;    action = code routine for this word, e.g.
+0000                	  53 ;             DOCOLON, or DOCODE for code words
+0000                	  54 ; IMMED defines a header for an IMMEDIATE word.
+0000                	  55 ;
+0000                	  56 ;head    MACRO   #label,#name,#action
+0000                	  57 ;        DAT link
+0000                	  58 ;        DAT 0
+0000                	  59 ;link    DEFL $
+0000                	  60 ;        DAT #length(#name),#name
+0000                	  61 ;#label:
+0000                	  62 ;        IF  .NOT.(#action=DOCODE)
+0000                	  63 ;        jsr #action
+0000                	  64 ;        ENDIF
+0000                	  65 ;        ENDM
+0000                	  66 ;
+0000                	  67 ;immed   MACRO   #label,#name,#action
+0000                	  68 ;        DAT link
+0000                	  69 ;        DAT 1
+0000                	  70 ;link    DEFL $
+0000                	  71 ;        DB #length(#name),#name
+0000                	  72 ;#label:
+0000                	  73 ;        IF  .NOT.(#action=DOCODE)
+0000                	  74 ;        jsr #action
+0000                	  75 ;        ENDIF
+0000                	  76 ;        ENDM
+0000                	  77 ;
+0000                	  78 ; The NEXT macro (3 words) assembles the 'next'
+0000                	  79 ; code in-line in every Z80 CamelForth CODE word.
+0000                	  80 ;next    MACRO
+0000                	  81 ;        set a,[z]   ;
+0000                	  82 ;     	 add z,1     ;
+0000                	  83 ;        set pc,a    ;
+0000                	  84 ;        ENDM
+0000                	  85 ;
+0000                	  86 ; ENTRY POINT ===================================
+0000                	  87 ; all registers zeroed, 64K words available
+0000  8540          	  88 :reset  ias 0         ; interrupts off
+0001  7c20 0087     	  89         jsr hwdetect  ; detect screen and keyboard
+0003  7c20 0097     	  90         jsr hwinit
+0005  7c81 fc00     	  91         set y,0xfc00  ; UP
+0007  7c61 ff00     	  92         set x,0xff00  ; RP
+0009  7f81 0deb     	  93         set pc,cold   ; enter top-level Forth word
+000b  8761          	  94         set sp,0
+000c  8421          	  95         set b,0
+000d  7f81 0000     	  96         set pc,reset  ; loop if COLD returns
+000f                	  97 
+000f                	  98 ; Memory map:
+000f                	  99 ; 0x0000..        Forth kernel and user dictionary
+000f                	 100 ; 0xfc00..0xfc7f  User area, 128 words
+000f                	 101 ; 0xfc80..0xfcff  Terminal Input Buffer, 128 words
+000f                	 102 ; 0xfd00..0xfdff  HOLD area, PAD buffer, L stack, 256 words (40+88+128)
+000f                	 103 ; 0xfe00..0xfeff  Return stack, 256 words
+000f                	 104 ; 0xff00..0xffff  Parameter stack, 256 words
+000f                	 105 ;
+000f                	 106 ; See also the definitions of U0, S0, and R0
+000f                	 107 ; in the "system variables & constants" area.
+000f                	 108 ; A task (user area) requires 0x400 words.
+000f                	 109 
+000f                	 110 ; INTERPRETER LOGIC =============================
+000f                	 111 ; See also "defining words" at end of this file
+000f                	 112 
+000f                	 113 ;C EXIT     --      exit a colon definition
+000f  0000 0000 0004	 114     head EXIT,"EXIT",docode
+0012  0045 0058 0049	 114
+0015  0054          	 114
+0016  2ca1          	 115         set z,[x]     ; pop old IP from ret stk
+0017  8862          	 116         add x,1
+0018  3401 88a2 0381	 117 :anext  next
+001b                	 118 
+001b                	 119 ;Z lit      -- x    fetch inline literal to stack
+001b                	 120 ; This is the primitive compiled by LITERAL.
+001b  0011 0000 0003	 121     head lit,"lit",docode
+001e  006c 0069 0074	 121
+0021  0701          	 122         set push,b     ; push old TOS
+0022  3421          	 123         set b,[z]      ; fetch cell at IP to TOS,
+0023  88a2          	 124         add z,1        ;        advancing IP
+0024  3401 88a2 0381	 125         next
+0027                	 126 
+0027                	 127 ;C EXECUTE   i*x xt -- j*x   execute Forth word
+0027                	 128 ;C                           at 'xt'
+0027  001d 0000 0007	 129     head EXECUTE,"EXECUTE",docode
+002a  0045 0058 0045	 129
+002d  0043 0055 0054	 129
+0030  0045          	 129
+0031  0401          	 130         set a,b		; address of word
+0032  6021          	 131         set b,pop	; get new TOS
+0033  0381          	 132         set pc,a	; go do Forth word
+0034                	 133 
+0034                	 134 ; DEFINING WORDS ================================
+0034                	 135 
+0034                	 136 ; ENTER, a.k.a. DOCOLON, entered by CALL ENTER
+0034                	 137 ; to enter a new high-level thread (colon def'n.)
+0034                	 138 ; (internal code fragment, not a Forth word)
+0034                	 139 ; N.B.: DOCOLON must be defined before any
+0034                	 140 ; appearance of 'docolon' in a 'word' macro!
+0034                	 141 :docolon               ; (alternate name)
+0034  8863          	 142 :enter  sub x,1        ; push old IP on ret stack
+0035  1561          	 143         set [x],z
+0036  60a1          	 144         set z,pop      ; param field adrs -> IP
+0037  3401 88a2 0381	 145         next
+003a                	 146 
+003a                	 147 ;C VARIABLE   --      define a Forth variable
+003a                	 148 ;   CREATE 1 CELLS ALLOT ;
+003a                	 149 ; Action of RAM variable is identical to CREATE,
+003a                	 150 ; so we don't need a DOES> clause to change it.
+003a  0029 0000 0008	 151     head VARIABLE,"VARIABLE",docolon
+003d  0056 0041 0052	 151
+0040  0049 0041 0042	 151
+0043  004c 0045 7c20	 151
+0046  0034          	 151
+0047  0ba3 0021 0001	 152         DW CREATE,LIT,1,CELLS,ALLOT,EXIT
+004a  04ee 093a 0016	 152
+004d                	 153 ; DOVAR, code action of VARIABLE, entered by CALL
+004d                	 154 ; DOCREATE, code action of newly created words
+004d                	 155 :docreate
+004d                	 156 :dovar  ; -- a-addr
+004d  6001          	 157         set a,pop  ; parameter field address
+004e  0701          	 158         set push,b ; push old TOS
+004f  0021          	 159         set b,a    ; pfa = variable's adrs -> TOS
+0050  3401 88a2 0381	 160         next
+0053                	 161 
+0053                	 162 ;C CONSTANT   n --      define a Forth constant
+0053                	 163 ;   CREATE , DOES> (machine code fragment)
+0053  003c 0000 0008	 164     head CONSTANT,"CONSTANT",docolon
+0056  0043 004f 004e	 164
+0059  0053 0054 0041	 164
+005c  004e 0054 7c20	 164
+005f  0034          	 164
+0060  0ba3 0943 0bc1	 165         DW CREATE,COMMA,XDOES
+0063                	 166 ; DOCON, code action of CONSTANT,
+0063                	 167 ; entered by CALL DOCON
+0063                	 168 :docon  ; -- x
+0063  6001          	 169         set a,pop  ; parameter field address
+0064  0701          	 170         set push,b ; push old TOS
+0065  2021          	 171         set b,[a]  ; fetch contents of parameter field -> TOS
+0066  3401 88a2 0381	 172         next
+0069                	 173 
+0069                	 174 ;Z USER     n --        define user variable 'n'
+0069                	 175 ;   CREATE , DOES> (machine code fragment)
+0069  0055 0000 0004	 176     head USER,"USER",docolon
+006c  0055 0053 0045	 176
+006f  0052 7c20 0034	 176
+0072  0ba3 0943 0bc1	 177         DW CREATE,COMMA,XDOES
+0075                	 178 ; DOUSER, code action of USER,
+0075                	 179 ; entered by CALL DOUSER
+0075                	 180 :douser  ; -- a-addr
+0075  6001          	 181         set a,pop  ; parameter field address
+0076  0701          	 182         set push,b ; push old TOS
+0077  2021          	 183         set b,[a]  ; fetch contents of parameter field (the offset)
+0078  1022          	 184         add b,y    ; add user base address
+0079  3401 88a2 0381	 185         next
+007c                	 186 
+007c                	 187 ; DODOES, code action of DOES> clause
+007c                	 188 ; entered by       CALL fragment
+007c                	 189 ;                  parameter field
+007c                	 190 ;                       ...
+007c                	 191 ;        fragment: CALL DODOES
+007c                	 192 ;                  high-level thread
+007c                	 193 ; Enters high-level thread with address of
+007c                	 194 ; parameter field on top of stack.
+007c                	 195 ; (internal code fragment, not a Forth word)
+007c                	 196 :dodoes ; -- a-addr
+007c  8863          	 197         sub x,1        ; push old IP on ret stk
+007d  1561          	 198         set [x],z
+007e  60a1          	 199         set z,pop      ; adrs of new thread -> IP
+007f  6001          	 200         set a,pop      ; adrs of parameter field
+0080  0701          	 201         set push,b     ; push old TOS onto stack
+0081  0021          	 202         set b,a        ; pfa -> new TOS
+0082  3401 88a2 0381	 203         next
+0085                	 204 
+0085                	 205 ; TERMINAL I/O =============================
+0085                	 206 
+0085  0000          	 207 :hwmon  dat 0           ; monitor device number
+0086  0000          	 208 :hwkbd  dat 0           ; keyboard device number
+0087                	 209 
+0087                	 210 :hwdetect
+0087  1e00          	 211         hwn j           ; query #devices
+0088  84c1          	 212         set i,0
+0089  1cd2          	 213 :hwloop ife i,j         ; so scan 0..n-1
+008a  6381          	 214           set pc,pop    ; return if done
+008b  1a20          	 215         hwq i
+008c  7c32 7349     	 216         ife b,0x7349    ; LEM1802?
+008e  1bc1 0085     	 217           set [hwmon],i
+0090  7c32 30cf     	 218         ife b,0x30cf    ; keyboard?
+0092  1bc1 0086     	 219           set [hwkbd],i
+0094  88c2          	 220         add i,1
+0095  7f81 0089     	 221         set pc,hwloop
+0097                	 222 
+0097  7821 00b3     	 223 :hwinit set b,[vrama]
+0099  8401          	 224         set a,0         ; MEM_MAP_SCREEN
+009a  7a40 0085     	 225         hwi [hwmon]
+009c                	 226         ; set b,0
+009c                	 227         ; set a,1         ; MEM_MAP_FONT: built-in
+009c                	 228         ; hwi [hwmon]
+009c                	 229         ; set a,2         ; MEM_MAP_PALETTE: built-in
+009c                	 230         ; hwi [hwmon]
+009c  9001          	 231         set a,3         ; SET_BORDER_COLOR
+009d  7821 00df     	 232         set b,[colora]
+009f  a42d          	 233         shr b,8
+00a0  7a40 0085     	 234         hwi [hwmon]
+00a2  8421          	 235         set b,0         ; turn off kbd interrupts
+00a3  9001          	 236         set a,3
+00a4  7a40 0086     	 237         hwi [hwkbd]
+00a6  8401          	 238         set a,0         ; clear keyboard buffer
+00a7  7a40 0086     	 239         hwi [hwkbd]
+00a9  6381          	 240         set pc,pop
+00aa                	 241 
+00aa                	 242 ;Z VRAM  -- addr  video RAM start
+00aa  006b 0000 0004	 243     head vram,"VRAM",docon
+00ad  0056 0052 0041	 243
+00b0  004d 7c20 0063	 243
+00b3  8000          	 244 :vrama  DW 0x8000
+00b4                	 245 
+00b4                	 246 ;Z VLEN  -- u   video RAM extent (words)
+00b4  00ac 0000 0004	 247     head vlen,"VLEN",docon
+00b7  0056 004c 0045	 247
+00ba  004e 7c20 0063	 247
+00bd  0180          	 248 :vlena  DW 384
+00be                	 249 
+00be                	 250 ;Z VCOLS -- u   video line length
+00be  00b6 0000 0005	 251     head vcols,"VCOLS",docon
+00c1  0056 0043 004f	 251
+00c4  004c 0053 7c20	 251
+00c7  0063          	 251
+00c8  0020          	 252         DW 32
+00c9                	 253 
+00c9                	 254 ;Z CURSOR  -- addr  cursor offset on screen (next char)
+00c9  00c0 0000 0006	 255     head cursor,"CURSOR",dovar
+00cc  0043 0055 0052	 255
+00cf  0053 004f 0052	 255
+00d2  7c20 004d     	 255
+00d4  0000          	 256 :cursora DW 0
+00d5                	 257 
+00d5                	 258 ;Z COLOR  -- addr  color mask applied to chars
+00d5  00cb 0000 0005	 259     head color,"COLOR",dovar
+00d8  0043 004f 004c	 259
+00db  004f 0052 7c20	 259
+00de  004d          	 259
+00df  a200          	 260 :colora DW 0xa200           ; green on green
+00e0                	 261 
+00e0                	 262 ;Z UNBLINK   -- u   store non-blinking blank at cursor
+00e0  00d7 0000 0007	 263     head UNBLINK,"UNBLINK",docolon
+00e3  0055 004e 0042	 263
+00e6  004c 0049 004e	 263
+00e9  004b 7c20 0034	 263
+00ec  00d2 0276 00b1	 264         DW cursor, fetch, vram, over, plus ; ( ofs a)
+00ef  01e6 0287     	 264
+00f1  00dd 0276 0583	 265         DW color, fetch, bl, plus, swop, store ; ( ofs)
+00f4  0287 01d9 0261	 265
+00f7  0016          	 266         DW exit
+00f8                	 267 
+00f8                	 268 ;C EMIT     c --    output character to console
+00f8  00e2 0000 0004	 269     head EMIT,"EMIT",docolon
+00fb  0045 004d 0049	 269
+00fe  0054 7c20 0034	 269
+0101  0021 0008 01e6	 270         DW lit, 8, over, equal, qbranch, notbs
+0104  034e 039b 0111	 270
+0107  01ce 00ea 02e7	 271         DW drop, unblink, oneminus
+010a  0021 0000 071f	 272         DW lit, 0, max, cursor, store
+010d  00d2 0261     	 272
+010f  038d 0124     	 273         DW branch, blink
+0111  00dd 0276 0287	 274 :notbs  DW color, fetch, plus ; ( c)
+0114  00d2 0276 00b1	 275         DW cursor, fetch, vram, plus, store ; ( )
+0117  0287 0261     	 275
+0119  00d2 0276 01b7	 276         DW cursor, fetch, dup, vlen, oneminus, uless ; ( ofs f)
+011c  00bb 02e7 0375	 276
+011f  039b 0137     	 277         DW qbranch, cr1
+0121  02de 00d2 0261	 278         DW oneplus, cursor, store ; ( )
+0124  00dd 0276 0021	 279 :blink  DW color, fetch, lit, 0x9f, plus
+0127  009f 0287     	 279
+0129  00d2 0276 00b1	 280         DW cursor, fetch, vram, plus, store, exit
+012c  0287 0261 0016	 280
+012f                	 281 
+012f                	 282 ;C CR      --               output newline
+012f  00fa 0000 0002	 283     head CR,"CR",docolon
+0132  0043 0052 7c20	 283
+0135  0034          	 283
+0136  00ea          	 284         DW unblink ; ( ofs)
+0137  00c6 02e7 02c7	 285 :cr1    DW vcols, oneminus, invert, and ; CR
+013a  02a7          	 285
+013b  01b7 00d2 0261	 286         DW dup, cursor, store ; ( ofs)
+013e  00bb 00c6 029b	 287         DW vlen, vcols, minus, equal  ; on last line?
+0141  034e          	 287
+0142  039b 0155     	 288         DW qbranch, noscroll
+0144  00b1 00c6 01e6	 289         DW vram, vcols, over, plus, swop ; ( a a2)
+0147  0287 01d9     	 289
+0149  00bb 00c6 029b	 290         DW vlen, vcols, minus, cmove  ; scroll
+014c  0450          	 290
+014d  00b1 00bb 0287	 291         DW vram, vlen, plus, vcols, minus ; ( a3)
+0150  00c6 029b     	 291
+0152  00c6 038d 0168	 292         DW vcols, branch, cls1        ; clear last line
+0155  00c6 00d2 032a	 293 :noscroll DW vcols, cursor, plusstore
+0158  038d 0124     	 294         DW branch, blink
+015a                	 295 
+015a                	 296 ;Z CLS    --    clear screen
+015a  0131 0000 0003	 297     head CLS,"CLS",docolon
+015d  0043 004c 0053	 297
+0160  7c20 0034     	 297
+0162  0021 0000 00d2	 298         DW lit, 0, cursor, store
+0165  0261          	 298
+0166  00b1 00bb     	 299         DW vram, vlen ; ( a u)
+0168  00dd 0276 0583	 300 :cls1   DW color, fetch, bl, plus, fill
+016b  0287 043b     	 300
+016d  038d 0124     	 301         DW branch, blink
+016f                	 302 
+016f                	 303 ;Z SAVEKEY  -- addr  temporary storage for KEY?
+016f  015c 0000 0007	 304     head savekey,"SAVEKEY",dovar
+0172  0053 0041 0056	 304
+0175  0045 004b 0045	 304
+0178  0059 7c20 004d	 304
+017b  0000          	 305 :savekeya DW 0
+017c                	 306 
+017c                	 307 ;X KEY?     -- f    return true if char waiting
+017c  0171 0000 0004	 308     head querykey,"KEY?",docode
+017f  004b 0045 0059	 308
+0182  003f          	 308
+0183  8801          	 309         set a,1
+0184  7a40 0086     	 310         hwi [hwkbd]         ; sets c register
+0186  c852          	 311         ife c,0x11          ; Return key?
+0187  b841          	 312           set c,0x0d
+0188  c452          	 313         ife c,0x10          ; Backspace key?
+0189  a441          	 314           set c,0x08
+018a  0bc1 017b     	 315         set [savekeya],c
+018c  0701          	 316         set push,b
+018d  0821          	 317         set b,c
+018e  3401 88a2 0381	 318         next
+0191                	 319 
+0191                	 320 ;C KEY      -- c    get character from keyboard
+0191                	 321 ;   BEGIN SAVEKEY C@ 0= WHILE KEY? DROP REPEAT
+0191                	 322 ;   SAVEKEY C@  0 SAVEKEY C! ;
+0191  017e 0000 0003	 323     head KEY,"KEY",docolon
+0194  004b 0045 0059	 323
+0197  7c20 0034     	 323
+0199  0179 027f 0334	 324 :KEY1   DW SAVEKEY,CFETCH,ZEROEQUAL,qbranch,KEY2
+019c  039b 01a2     	 324
+019e  0183 01ce 038d	 325         DW QUERYKEY,DROP,branch,KEY1
+01a1  0199          	 325
+01a2  0179 027f 0021	 326 :KEY2   DW SAVEKEY,CFETCH,LIT,0,SAVEKEY,CSTORE
+01a5  0000 0179 026c	 326
+01a8  0016          	 327         DW EXIT
+01a9                	 328 
+01a9                	 329 
+01a9                	 330 ;X BYE     i*x --    return to CP/M
+01a9  0193 0000 0003	 331     head bye,"bye",docode
+01ac  0062 0079 0065	 331
+01af  7f81 01af     	 332 :halt	set pc,halt
+01b1                	 333 
+01b1                	 334 ; STACK OPERATIONS ==============================
+01b1                	 335 
+01b1                	 336 ;C DUP      x -- x x      duplicate top of stack
+01b1  01ab 0000 0003	 337     head DUP,"DUP",docode
+01b4  0044 0055 0050	 337
+01b7  0701          	 338 :pushtos set push,b
+01b8  3401 88a2 0381	 339         next
+01bb                	 340 
+01bb                	 341 ;C ?DUP     x -- 0 | x x    DUP if nonzero
+01bb  01b3 0000 0004	 342     head QDUP,"?DUP",docode
+01be  003f 0044 0055	 342
+01c1  0050          	 342
+01c2  8433          	 343         ifn b,0
+01c3  0701          	 344           set push,b
+01c4  3401 88a2 0381	 345         next
+01c7                	 346 
+01c7                	 347 ;C DROP     x --          drop top of stack
+01c7  01bd 0000 0004	 348     head DROP,"DROP",docode
+01ca  0044 0052 004f	 348
+01cd  0050          	 348
+01ce  6021          	 349 :poptos set b,pop
+01cf  3401 88a2 0381	 350         next
+01d2                	 351 
+01d2                	 352 ;C SWAP     x1 x2 -- x2 x1    swap top two items
+01d2  01c9 0000 0004	 353     head SWOP,"SWAP",docode
+01d5  0053 0057 0041	 353
+01d8  0050          	 353
+01d9  0401          	 354         set a,b
+01da  6421          	 355         set b,peek
+01db  0321          	 356         set peek,a
+01dc  3401 88a2 0381	 357         next
+01df                	 358 
+01df                	 359 ;C OVER    x1 x2 -- x1 x2 x1   per stack diagram
+01df  01d4 0000 0004	 360     head OVER,"OVER",docode
+01e2  004f 0056 0045	 360
+01e5  0052          	 360
+01e6  6401          	 361         set a,peek
+01e7  0701          	 362         set push,b
+01e8  0021          	 363         set b,a
+01e9  3401 88a2 0381	 364         next
+01ec                	 365 
+01ec                	 366 ;C ROT    x1 x2 x3 -- x2 x3 x1  per stack diagram
+01ec  01e1 0000 0003	 367     head ROT,"ROT",docode
+01ef  0052 004f 0054	 367
+01f2                	 368         ; x3 is in TOS
+01f2  6001          	 369         set a,pop       ; x2
+01f3  6041          	 370         set c,pop       ; x1
+01f4  0301          	 371         set push,a
+01f5  0701          	 372         set push,b
+01f6  0821          	 373         set b,c
+01f7  3401 88a2 0381	 374         next
+01fa                	 375 
+01fa                	 376 ;X NIP    x1 x2 -- x2           per stack diagram
+01fa  01ee 0000 0003	 377     head NIP,"NIP",docode
+01fd  004e 0049 0050	 377
+0200  6001          	 378         set a,pop
+0201  3401 88a2 0381	 379         next
+0204                	 380 
+0204                	 381 ;X TUCK   x1 x2 -- x2 x1 x2     per stack diagram
+0204  01fc 0000 0004	 382     head TUCK,"TUCK",docode
+0207  0054 0055 0043	 382
+020a  004b          	 382
+020b  6001          	 383         set a,pop
+020c  0701          	 384         set push,b
+020d  0301          	 385         set push,a
+020e  3401 88a2 0381	 386         next
+0211                	 387 
+0211                	 388 ;C >R    x --   R: -- x   push to return stack
+0211  0206 0000 0002	 389     head TOR,">R",docode
+0214  003e 0052     	 389
+0216  8863          	 390         sub x,1
+0217  0561          	 391         set [x],b       ; push TOS onto rtn stk
+0218  6021          	 392         set b,pop	; pop new TOS
+0219  3401 88a2 0381	 393         next
+021c                	 394 
+021c                	 395 ;C R>    -- x    R: x --   pop from return stack
+021c  0213 0000 0002	 396     head RFROM,"R>",docode
+021f  0052 003e     	 396
+0221  0701          	 397         set push,b      ; push old TOS
+0222  2c21          	 398         set b,[x]       ; pop top rtn stk item
+0223  8862          	 399         add x,1         ;       to TOS
+0224  3401 88a2 0381	 400         next
+0227                	 401 
+0227                	 402 ;C R@    -- x     R: x -- x   fetch from rtn stk
+0227  021e 0000 0002	 403     head RFETCH,"R@",docode
+022a  0052 0040     	 403
+022c  0701          	 404         set push,b      ; push old TOS
+022d  2c21          	 405         set b,[x]       ; fetch top rtn stk item
+022e  3401 88a2 0381	 406         next
+0231                	 407 
+0231                	 408 ;Z SP@  -- a-addr       get data stack pointer
+0231  0229 0000 0003	 409     head SPFETCH,"SP@",docode
+0234  0053 0050 0040	 409
+0237  0701          	 410         set push,b
+0238  6c21          	 411         set b,sp
+0239  3401 88a2 0381	 412         next
+023c                	 413 
+023c                	 414 ;Z SP!  a-addr --       set data stack pointer
+023c  0233 0000 0003	 415     head SPSTORE,"SP!",docode
+023f  0053 0050 0021	 415
+0242  0761          	 416         set sp,b
+0243  6021          	 417         set b,pop       ; get new TOS
+0244  3401 88a2 0381	 418         next
+0247                	 419 
+0247                	 420 ;Z RP@  -- a-addr       get return stack pointer
+0247  023e 0000 0003	 421     head RPFETCH,"RP@",docode
+024a  0052 0050 0040	 421
+024d  0701          	 422         set push,b
+024e  0c21          	 423         set b,x
+024f  3401 88a2 0381	 424         next
+0252                	 425 
+0252                	 426 ;Z RP!  a-addr --       set return stack pointer
+0252  0249 0000 0003	 427     head RPSTORE,"RP!",docode
+0255  0052 0050 0021	 427
+0258  0461          	 428         set x,b
+0259  6021          	 429         set b,pop
+025a  3401 88a2 0381	 430         next
+025d                	 431 
+025d                	 432 ; MEMORY AND I/O OPERATIONS =====================
+025d                	 433 
+025d                	 434 ;C !        x a-addr --   store cell in memory
+025d  0254 0000 0001	 435     head STORE,"!",docode
+0260  0021          	 435
+0261  6001          	 436         set a,pop	; data
+0262  0121          	 437         set [b],a
+0263  6021          	 438         set b,pop       ; pop new TOS
+0264  3401 88a2 0381	 439         next
+0267                	 440 
+0267                	 441 ;C C!      char c-addr --    store char in memory
+0267  025f 0000 0002	 442     head CSTORE,"C!",docode
+026a  0043 0021     	 442
+026c  6001          	 443         set a,pop	; data
+026d  0121          	 444         set [b],a
+026e  6021          	 445         set b,pop       ; pop new TOS
+026f  3401 88a2 0381	 446         next
+0272                	 447 
+0272                	 448 ;C @       a-addr -- x   fetch cell from memory
+0272  0269 0000 0001	 449     head FETCH,"@",docode
+0275  0040          	 449
+0276  2421          	 450         set b,[b]
+0277  3401 88a2 0381	 451         next
+027a                	 452 
+027a                	 453 ;C C@     c-addr -- char   fetch char from memory
+027a  0274 0000 0002	 454     head CFETCH,"C@",docode
+027d  0043 0040     	 454
+027f  2421          	 455         set b,[b]
+0280  3401 88a2 0381	 456         next
+0283                	 457 
+0283                	 458 ;Z PC!     char c-addr --    output char to port
+0283                	 459 ;    head PCSTORE,"PC!",docode
+0283                	 460 ;        pop hl          ; char in L
+0283                	 461 ;        out (c),l       ; to port (BC)
+0283                	 462 ;        pop bc          ; pop new TOS
+0283                	 463 ;        next
+0283                	 464 ;
+0283                	 465 ;Z PC@     c-addr -- char   input char from port
+0283                	 466 ;    head PCFETCH,"PC@",docode
+0283                	 467 ;        in c,(c)        ; read port (BC) to C
+0283                	 468 ;        ld b,0
+0283                	 469 ;        next
+0283                	 470 ;
+0283                	 471 ; ARITHMETIC AND LOGICAL OPERATIONS =============
+0283                	 472 
+0283                	 473 ;C +       n1/u1 n2/u2 -- n3/u3     add n1+n2
+0283  027c 0000 0001	 474     head PLUS,"+",docode
+0286  002b          	 474
+0287  6022          	 475         add b,pop
+0288  3401 88a2 0381	 476         next
+028b                	 477 
+028b                	 478 ;X M+       d n -- d         add single to double
+028b  0285 0000 0002	 479     head MPLUS,"M+",docode
+028e  004d 002b     	 479
+0290  6041          	 480         set c,pop       ; hi cell
+0291  0722          	 481         add peek,b      ; lo cell remains on stack
+0292  7442          	 482         add c,ex
+0293  0821          	 483         set b,c
+0294  3401 88a2 0381	 484         next
+0297                	 485 
+0297                	 486 ;C -      n1/u1 n2/u2 -- n3/u3    subtract n1-n2
+0297  028d 0000 0001	 487     head MINUS,"-",docode
+029a  002d          	 487
+029b  0401          	 488         set a,b
+029c  6021          	 489         set b,pop
+029d  0023          	 490         sub b,a
+029e  3401 88a2 0381	 491         next
+02a1                	 492 
+02a1                	 493 ;C AND    x1 x2 -- x3            logical AND
+02a1  0299 0000 0003	 494     head AND,"AND",docode
+02a4  0041 004e 0044	 494
+02a7  602a          	 495         and b,pop
+02a8  3401 88a2 0381	 496         next
+02ab                	 497 
+02ab                	 498 ;C OR     x1 x2 -- x3           logical OR
+02ab  02a3 0000 0002	 499     head OR,"OR",docode
+02ae  004f 0052     	 499
+02b0  602b          	 500         bor b,pop
+02b1  3401 88a2 0381	 501         next
+02b4                	 502 
+02b4                	 503 ;C XOR    x1 x2 -- x3            logical XOR
+02b4  02ad 0000 0003	 504     head XOR,"XOR",docode
+02b7  0058 004f 0052	 504
+02ba  602c          	 505         xor b,pop
+02bb  3401 88a2 0381	 506         next
+02be                	 507 
+02be                	 508 ;C INVERT   x1 -- x2            bitwise inversion
+02be  02b6 0000 0006	 509     head INVERT,"INVERT",docode
+02c1  0049 004e 0056	 509
+02c4  0045 0052 0054	 509
+02c7  802c          	 510         xor b,-1
+02c8  3401 88a2 0381	 511         next
+02cb                	 512 
+02cb                	 513 ;C NEGATE   x1 -- x2            two's complement
+02cb  02c0 0000 0006	 514     head NEGATE,"NEGATE",docode
+02ce  004e 0045 0047	 514
+02d1  0041 0054 0045	 514
+02d4  802c          	 515         xor b,-1
+02d5  8822          	 516         add b,1
+02d6  3401 88a2 0381	 517         next
+02d9                	 518 
+02d9                	 519 ;C 1+      n1/u1 -- n2/u2       add 1 to TOS
+02d9  02cd 0000 0002	 520     head ONEPLUS,"1+",docode
+02dc  0031 002b     	 520
+02de  8822          	 521         add b,1
+02df  3401 88a2 0381	 522         next
+02e2                	 523 
+02e2                	 524 ;C 1-      n1/u1 -- n2/u2     subtract 1 from TOS
+02e2  02db 0000 0002	 525     head ONEMINUS,"1-",docode
+02e5  0031 002d     	 525
+02e7  8823          	 526         sub b,1
+02e8  3401 88a2 0381	 527         next
+02eb                	 528 
+02eb                	 529 ;Z ><      x1 -- x2         swap bytes (not ANSI)
+02eb  02e4 0000 0002	 530     head swapbytes,"><",docode
+02ee  003e 003c     	 530
+02f0  a42f          	 531         shl b,8
+02f1  742b          	 532         bor b,ex
+02f2  3401 88a2 0381	 533         next
+02f5                	 534 
+02f5                	 535 ;C 2*      x1 -- x2         arithmetic left shift
+02f5  02ed 0000 0002	 536     head TWOSTAR,"2*",docode
+02f8  0032 002a     	 536
+02fa  882f          	 537         shl b,1
+02fb  3401 88a2 0381	 538         next
+02fe                	 539 
+02fe                	 540 ;C 2/      x1 -- x2        arithmetic right shift
+02fe  02f7 0000 0002	 541     head TWOSLASH,"2/",docode
+0301  0032 002f     	 541
+0303  882e          	 542         asr b,1
+0304  3401 88a2 0381	 543         next
+0307                	 544 
+0307                	 545 ;C LSHIFT  x1 u -- x2    logical L shift u places
+0307  0300 0000 0006	 546     head LSHIFT,"LSHIFT",docode
+030a  004c 0053 0048	 546
+030d  0049 0046 0054	 546
+0310  0401          	 547         set a,b	      ; count
+0311  6021          	 548         set b,pop
+0312  002f          	 549         shl b,a
+0313  3401 88a2 0381	 550         next
+0316                	 551 
+0316                	 552 ;C RSHIFT  x1 u -- x2    logical R shift u places
+0316  0309 0000 0006	 553     head RSHIFT,"RSHIFT",docode
+0319  0052 0053 0048	 553
+031c  0049 0046 0054	 553
+031f  0401          	 554         set a,b	      ; count
+0320  6021          	 555         set b,pop
+0321  002d          	 556         shr b,a
+0322  3401 88a2 0381	 557         next
+0325                	 558 
+0325                	 559 ;C +!     n/u a-addr --       add cell to memory
+0325  0318 0000 0002	 560     head PLUSSTORE,"+!",docode
+0328  002b 0021     	 560
+032a  6122          	 561         add [b],pop
+032b  6021          	 562         set b,pop
+032c  3401 88a2 0381	 563         next
+032f                	 564 
+032f                	 565 ; COMPARISON OPERATIONS =========================
+032f                	 566 
+032f                	 567 ;C 0=     n/u -- flag    return true if TOS=0
+032f  0327 0000 0002	 568     head ZEROEQUAL,"0=",docode
+0332  0030 003d     	 568
+0334  8433          	 569         ifn b,0
+0335  8821          	 570           set b,1
+0336  8823          	 571         sub b,1
+0337  3401 88a2 0381	 572         next
+033a                	 573 
+033a                	 574 ;C 0<     n -- flag      true if TOS negative
+033a  0331 0000 0002	 575     head ZEROLESS,"0<",docode
+033d  0030 003c     	 575
+033f  8437          	 576         ifu b,0
+0340  7f81 0346     	 577           set pc,tostrue
+0342                	 578 :tosfalse
+0342  8421          	 579         set b,0
+0343  3401 88a2 0381	 580         next
+0346                	 581 :tostrue
+0346  8021          	 582         set b,-1
+0347  3401 88a2 0381	 583         next
+034a                	 584 
+034a                	 585 ;C =      x1 x2 -- flag         test x1=x2
+034a  033c 0000 0001	 586     head EQUAL,"=",docode
+034d  003d          	 586
+034e  6032          	 587         ife b,pop
+034f  7f81 0346     	 588           set pc,tostrue
+0351  7f81 0342     	 589         set pc,tosfalse
+0353                	 590 
+0353                	 591 ;X <>     x1 x2 -- flag    test not eq (not ANSI)
+0353  034c 0000 0002	 592     head NOTEQUAL,"<>",docolon
+0356  003c 003e 7c20	 592
+0359  0034          	 592
+035a  034e 0334 0016	 593         DW EQUAL,ZEROEQUAL,EXIT
+035d                	 594 
+035d                	 595 ;C <      n1 n2 -- flag        test n1<n2, signed
+035d  0355 0000 0001	 596     head LESS,"<",docode
+0360  003c          	 596
+0361  6001          	 597         set a,pop             ; n1
+0362  0417          	 598         ifu a,b
+0363  7f81 0346     	 599           set pc,tostrue
+0365  7f81 0342     	 600         set pc,tosfalse
+0367                	 601 
+0367                	 602 ;C >     n1 n2 -- flag         test n1>n2, signed
+0367  035f 0000 0001	 603     head GREATER,">",docolon
+036a  003e 7c20 0034	 603
+036d  01d9 0361 0016	 604         DW SWOP,LESS,EXIT
+0370                	 605 
+0370                	 606 ;C U<    u1 u2 -- flag       test u1<n2, unsigned
+0370  0369 0000 0002	 607     head ULESS,"U<",docode
+0373  0055 003c     	 607
+0375  6034          	 608         ifg b,pop
+0376  7f81 0346     	 609           set pc,tostrue
+0378  7f81 0342     	 610         set pc,tosfalse
+037a                	 611 
+037a                	 612 ;X U>    u1 u2 -- flag     u1>u2 unsgd (not ANSI)
+037a  0372 0000 0002	 613     head UGREATER,"U>",docolon
+037d  0055 003e 7c20	 613
+0380  0034          	 613
+0381  01d9 0375 0016	 614         DW SWOP,ULESS,EXIT
+0384                	 615 
+0384                	 616 ; LOOP AND BRANCH OPERATIONS ====================
+0384                	 617 
+0384                	 618 ;Z branch   --                  branch always
+0384  037c 0000 0006	 619     head branch,"branch",docode
+0387  0062 0072 0061	 619
+038a  006e 0063 0068	 619
+038d  34a1          	 620 :dobranch set z,[z]     ; get inline value => IP
+038e  3401 88a2 0381	 621         next
+0391                	 622 
+0391                	 623 ;Z ?branch   x --              branch if TOS zero
+0391  0386 0000 0007	 624     head qbranch,"?branch",docode
+0394  003f 0062 0072	 624
+0397  0061 006e 0063	 624
+039a  0068          	 624
+039b  0401          	 625         set a,b
+039c  6021          	 626         set b,pop	; pop new TOS
+039d  8412          	 627         ife a,0
+039e  7f81 038d     	 628           set pc,dobranch
+03a0  88a2          	 629         add z,1		; else skip inline value
+03a1  3401 88a2 0381	 630         next
+03a4                	 631 
+03a4                	 632 ;Z (do)    n1|u1 n2|u2 --  R: -- sys1 sys2
+03a4                	 633 ;Z                          run-time code for DO
+03a4                	 634 ; '83 and ANSI standard loops terminate when the
+03a4                	 635 ; boundary of limit-1 and limit is crossed, in
+03a4                	 636 ; either direction.  This can be conveniently
+03a4                	 637 ; implemented by making the limit 8000h, so that
+03a4                	 638 ; arithmetic overflow logic can detect crossing.
+03a4                	 639 ; I learned this trick from Laxen & Perry F83.
+03a4                	 640 ; fudge factor = 8000h-limit, to be added to
+03a4                	 641 ; the start value.
+03a4  0393 0000 0004	 642     head xdo,"(do)",docode
+03a7  0028 0064 006f	 642
+03aa  0029          	 642
+03ab  7c41 8000     	 643         set c,0x8000
+03ad  6043          	 644         sub c,pop     ; 0x8000-limit
+03ae  8863          	 645         sub x,1
+03af  0961          	 646         set [x],c     ; push as fudge factor
+03b0  0822          	 647         add b,c       ; add fudge to start value
+03b1  8863          	 648         sub x,1
+03b2  0561          	 649         set [x],b     ; push adjusted start value
+03b3  6021          	 650         set b,pop
+03b4  3401 88a2 0381	 651         next
+03b7                	 652 
+03b7                	 653 ;Z (loop)   R: sys1 sys2 --  | sys1 sys2
+03b7                	 654 ;Z                        run-time code for LOOP
+03b7                	 655 ; Add 1 to the loop index.  If loop terminates,
+03b7                	 656 ; clean up the return stack and skip the branch.
+03b7                	 657 ; Else take the inline branch.  Note that LOOP
+03b7                	 658 ; terminates when index=8000h.
+03b7  03a6 0000 0006	 659     head xloop,"(loop)",docode
+03ba  0028 006c 006f	 659
+03bd  006f 0070 0029	 659
+03c0  8801          	 660         set a,1           ; the increment
+03c1  2c02          	 661 :loopad add a,[x]         ; get the loop index
+03c2  7c12 8000     	 662         ife a,0x8000
+03c4  7f81 03c9     	 663           set pc,looptr   ; terminate loop
+03c6  0161          	 664         set [x],a         ; save updated index
+03c7  7f81 038d     	 665         set pc,dobranch   ; continue the loop
+03c9  8c62          	 666 :looptr add x,2           ; discard loop info
+03ca  88a2          	 667         add z,1           ; skip the inline branch
+03cb  3401 88a2 0381	 668         next
+03ce                	 669 
+03ce                	 670 ;Z (+loop)   n --   R: sys1 sys2 --  | sys1 sys2
+03ce                	 671 ;Z                        run-time code for +LOOP
+03ce                	 672 ; Add n to the loop index.  If loop terminates,
+03ce                	 673 ; clean up the return stack and skip the branch.
+03ce                	 674 ; Else take the inline branch.
+03ce  03b9 0000 0007	 675     head xplusloop,"(+loop)",docode
+03d1  0028 002b 006c	 675
+03d4  006f 006f 0070	 675
+03d7  0029          	 675
+03d8  0401          	 676         set a,b           ; the increment
+03d9  6021          	 677         set b,pop         ; get new TOX
+03da  7f81 03c1     	 678         set pc,loopad
+03dc                	 679 
+03dc                	 680 ;C I        -- n   R: sys1 sys2 -- sys1 sys2
+03dc                	 681 ;C                  get the innermost loop index
+03dc  03d0 0000 0001	 682     head II,"I",docode
+03df  0049          	 682
+03e0  0701          	 683         set push,b        ; push old TOS
+03e1  2c21          	 684         set b,[x]         ; get loop index
+03e2  4c23 0001     	 685         sub b,[1+x]       ; subtract fudge factor though
+03e4  3401 88a2 0381	 686         next
+03e7                	 687 
+03e7                	 688 ;C J        -- n   R: 4*sys -- 4*sys
+03e7                	 689 ;C                  get the second loop index
+03e7  03de 0000 0001	 690     head JJ,"J",docode
+03ea  004a          	 690
+03eb  0701          	 691         set push,b        ; push old TOS
+03ec  4c21 0002     	 692         set b,[2+x]       ; get outer loop index
+03ee  4c23 0003     	 693         sub b,[3+x]       ; subtract fudge factor though
+03f0  3401 88a2 0381	 694         next
+03f3                	 695 
+03f3                	 696 ;C UNLOOP   --   R: sys1 sys2 --  drop loop parms
+03f3  03e9 0000 0006	 697     head UNLOOP,"UNLOOP",docode
+03f6  0055 004e 004c	 697
+03f9  004f 004f 0050	 697
+03fc  8c62          	 698         add x,2
+03fd  3401 88a2 0381	 699         next
+0400                	 700 
+0400                	 701 ; MULTIPLY AND DIVIDE ===========================
+0400                	 702 
+0400                	 703 ;C UM*     u1 u2 -- ud   unsigned 16x16->32 mult.
+0400  03f5 0000 0003	 704     head UMSTAR,"UM*",docode
+0403  0055 004d 002a	 704
+0406  6024          	 705         mul b,pop
+0407  0701          	 706         set push,b
+0408  7421          	 707         set b,ex
+0409  3401 88a2 0381	 708         next
+040c                	 709 
+040c                	 710 ;C UM/MOD   ud u1 -- u2 u3   unsigned 32/16->16
+040c  0402 0000 0006	 711     head UMSLASHMOD,"UM/MOD",docode
+040f  0055 004d 002f	 711
+0412  004d 004f 0044	 711
+0415  6001          	 712         set a,pop   ; AC = dividend, B=divisor
+0416  6041          	 713         set c,pop
+0417  c4c1          	 714         set i,16    ; loop counter
+0418  884f          	 715         shl c,1     ; sets EX to MSB
+0419  001a          	 716 :udloop adx a,a     ; rotate
+041a  87b2          	 717         ife ex,0
+041b  7f81 0421     	 718           set pc,ud16
+041d  0403          	 719 :ud17   sub a,b     ; always fits
+041e  87a1          	 720         set ex,0
+041f  7f81 0427     	 721         set pc,udjoin
+0421  0403          	 722 :ud16   sub a,b
+0422  87b2          	 723         ife ex,0    ; it fit
+0423  7f81 0427     	 724           set pc,udjoin
+0425  0402          	 725         add a,b     ; restore step
+0426  8ba1          	 726         set ex,1
+0427  085a          	 727 :udjoin adx c,c     ; rotate (complemented) result bit in
+0428  1cff          	 728         std j,j     ; side effect: decrement i, don't clobber EX
+0429  84d2          	 729         ife i,0
+042a  7f81 042e     	 730           set pc,udfin
+042c  7f81 0419     	 731         set pc,udloop
+042e  804c          	 732 :udfin  xor c,-1    ; de-complement quotient
+042f  0301          	 733         set push,a
+0430  0821          	 734         set b,c
+0431  3401 88a2 0381	 735         next
+0434                	 736 
+0434                	 737 ; BLOCK AND STRING OPERATIONS ===================
+0434                	 738 
+0434                	 739 ;C FILL   c-addr u char --  fill memory with char
+0434  040e 0000 0004	 740     head FILL,"FILL",docode
+0437  0046 0049 004c	 740
+043a  004c          	 740
+043b  60c1          	 741         set i,pop
+043c  6001          	 742         set a,pop
+043d  84d2          	 743 :filoop ife i,0
+043e  7f81 0444     	 744           set pc,mdone
+0440  051f          	 745         std [a],b       ; decrements i
+0441  8802          	 746         add a,1
+0442  7f81 043d     	 747         set pc,filoop
+0444  6021          	 748 :mdone  set b,pop
+0445  3401 88a2 0381	 749         next
+0448                	 750 
+0448                	 751 ;X CMOVE   c-addr1 c-addr2 u --  move from bottom
+0448                	 752 ; as defined in the ANSI optional String word set
+0448                	 753 ; On byte machines, CMOVE and CMOVE> are logical
+0448                	 754 ; factors of MOVE.  They are easy to implement on
+0448                	 755 ; CPUs which have a block-move instruction.
+0448  0436 0000 0005	 756     head CMOVE,"CMOVE",docode
+044b  0043 004d 004f	 756
+044e  0056 0045     	 756
+0450  60c1          	 757         set i,pop       ; destination address
+0451  60e1          	 758         set j,pop       ; source address
+0452  8432          	 759 :cmloop ife b,0
+0453  7f81 0444     	 760           set pc,mdone
+0455  3dde          	 761         sti [i],[j]
+0456  8823          	 762         sub b,1
+0457  7f81 0452     	 763         set pc,cmloop
+0459                	 764 
+0459                	 765 ;X CMOVE>  c-addr1 c-addr2 u --  move from top
+0459                	 766 ; as defined in the ANSI optional String word set
+0459  044a 0000 0006	 767     head CMOVEUP,"CMOVE>",docode
+045c  0043 004d 004f	 767
+045f  0056 0045 003e	 767
+0462  60c1          	 768         set i,pop       ; destination address
+0463  04c2          	 769         add i,b
+0464  88c3          	 770         sub i,1
+0465  60e1          	 771         set j,pop       ; source address
+0466  04e2          	 772         add j,b
+0467  88e3          	 773         sub j,1
+0468  8432          	 774 :cploop ife b,0
+0469  7f81 0444     	 775           set pc,mdone
+046b  3ddf          	 776         std [i],[j]
+046c  8823          	 777         sub b,1
+046d  7f81 0468     	 778         set pc,cploop
+046f                	 779 
+046f                	 780 ;Z SKIP   c-addr u c -- c-addr' u'
+046f                	 781 ;Z                          skip matching chars
+046f                	 782 ; Although SKIP, SCAN, and S= are perhaps not the
+046f                	 783 ; ideal factors of WORD and FIND, they closely
+046f                	 784 ; follow the string operations available on many
+046f                	 785 ; CPUs, and so are easy to implement and fast.
+046f  045b 0000 0004	 786     head skip,"SKIP",docode
+0472  0053 004b 0049	 786
+0475  0050          	 786
+0476  6041          	 787         set c,pop
+0477  6001          	 788         set a,pop
+0478  8452          	 789 :skipn  ife c,0
+0479  7f81 0482     	 790           set pc,skipd
+047b  0513          	 791         ifn [a],b
+047c  7f81 0482     	 792           set pc,skipd
+047e  8802          	 793         add a,1
+047f  8843          	 794         sub c,1
+0480  7f81 0478     	 795         set pc,skipn
+0482  0301          	 796 :skipd  set push,a
+0483  0821          	 797         set b,c
+0484  3401 88a2 0381	 798         next
+0487                	 799 
+0487                	 800 ;Z SCAN    c-addr u c -- c-addr' u'
+0487                	 801 ;Z                      find matching char
+0487  0471 0000 0004	 802     head scan,"SCAN",docode
+048a  0053 0043 0041	 802
+048d  004e          	 802
+048e  6041          	 803         set c,pop
+048f  6001          	 804         set a,pop
+0490  8452          	 805 :scann  ife c,0
+0491  7f81 049a     	 806           set pc,scand
+0493  0512          	 807         ife [a],b
+0494  7f81 049a     	 808           set pc,scand
+0496  8802          	 809         add a,1
+0497  8843          	 810         sub c,1
+0498  7f81 0490     	 811         set pc,scann
+049a  0301          	 812 :scand  set push,a
+049b  0821          	 813         set b,c
+049c  3401 88a2 0381	 814         next
+049f                	 815 
+049f                	 816 ;Z S=    c-addr1 c-addr2 u -- n   string compare
+049f                	 817 ;Z             n<0: s1<s2, n=0: s1=s2, n>0: s1>s2
+049f  0489 0000 0002	 818     head sequal,"S=",docode
+04a2  0053 003d     	 818
+04a4  60e1          	 819         set j,pop   ; addr2
+04a5  60c1          	 820         set i,pop   ; addr1
+04a6  8432          	 821 :sloop  ife b,0
+04a7  7f81 04b5     	 822           set pc,smatch ; by definition, match!
+04a9  3801          	 823         set a,[i]
+04aa  3c03          	 824         sub a,[j]
+04ab  8413          	 825         ifn a,0
+04ac  7f81 04b1     	 826           set pc,sdiff
+04ae  8823          	 827         sub b,1
+04af  7f9e 04a6     	 828         sti pc,sloop
+04b1  c00e          	 829 :sdiff  asr a,15    ; smear sign bit across A
+04b2  8412          	 830         ife a,0
+04b3  8802          	 831           add a,1
+04b4  0021          	 832         set b,a
+04b5  3401 88a2 0381	 833 :smatch next
+04b8                	 834 
+04b8                	   0         INCLUDE camel16d ; CPU Dependencies
+04b8                	   1 ; LISTING 3.
+04b8                	   2 ;
+04b8                	   3 ; ===============================================
+04b8                	   4 ; CamelForth for the Mojang DCPU-16 (http://0x10c.com)
+04b8                	   5 ; Copyright (c) 2012 Helge Horch
+04b8                	   6 ; CamelForth for the Zilog Z80
+04b8                	   7 ; Copyright (c) 1994,1995 Bradford J. Rodriguez
+04b8                	   8 ;
+04b8                	   9 ; This program is free software; you can redistribute it and/or modify
+04b8                	  10 ; it under the terms of the GNU General Public License as published by
+04b8                	  11 ; the Free Software Foundation; either version 3 of the License, or
+04b8                	  12 ; (at your option) any later version.
+04b8                	  13 ;
+04b8                	  14 ; This program is distributed in the hope that it will be useful,
+04b8                	  15 ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+04b8                	  16 ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+04b8                	  17 ; GNU General Public License for more details.
+04b8                	  18 ;
+04b8                	  19 ; You should have received a copy of the GNU General Public License
+04b8                	  20 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+04b8                	  21 
+04b8                	  22 ; Commercial inquiries should be directed to the author at 
+04b8                	  23 ; 115 First St., #105, Collingwood, Ontario L9Y 4W3 Canada
+04b8                	  24 ; or via email to bj@camelforth.com
+04b8                	  25 ;
+04b8                	  26 ; ===============================================
+04b8                	  27 ; CAMEL16D.S: CPU and Model Dependencies
+04b8                	  28 ;   Source code is for the ASM assembler.
+04b8                	  29 ;   Forth words are documented as follows:
+04b8                	  30 ;*   NAME     stack -- stack    description
+04b8                	  31 ;   Word names in upper case are from the ANS
+04b8                	  32 ;   Forth Core word set.  Names in lower case are
+04b8                	  33 ;   "internal" implementation words & extensions.
+04b8                	  34 ;
+04b8                	  35 ; Direct-Threaded Forth model for Mojang DCPU-16
+04b8                	  36 ;   cell size is   16 bits (1 word)
+04b8                	  37 ;   char size is   16 bits (1 word)
+04b8                	  38 ;   address unit is 16 bits (1 word)
+04b8                	  39 ; ===============================================
+04b8                	  40 
+04b8                	  41 ; ALIGNMENT AND PORTABILITY OPERATORS ===========
+04b8                	  42 ; Many of these are synonyms for other words,
+04b8                	  43 ; and so are defined as CODE words.
+04b8                	  44 
+04b8                	  45 ;C ALIGN    --                         align HERE
+04b8  04a1 0000 0005	  46     head ALIGN,"ALIGN",docode
+04bb  0041 004c 0049	  46
+04be  0047 004e     	  46
+04c0  3401 88a2 0381	  47         next
+04c3                	  48 
+04c3                	  49 ;C ALIGNED  addr -- a-addr       align given addr
+04c3  04ba 0000 0007	  50     head ALIGNED,"ALIGNED",docode
+04c6  0041 004c 0049	  50
+04c9  0047 004e 0045	  50
+04cc  0044          	  50
+04cd  3401 88a2 0381	  51         next
+04d0                	  52 
+04d0                	  53 ;Z CELL     -- n                 size of one cell
+04d0  04c5 0000 0004	  54     head CELL,"CELL",docon
+04d3  0043 0045 004c	  54
+04d6  004c 7c20 0063	  54
+04d9  0001          	  55         dw 1
+04da                	  56 
+04da                	  57 ;C CELL+    a-addr1 -- a-addr2      add cell size
+04da                	  58 ;   1+ ;
+04da  04d2 0000 0005	  59     head CELLPLUS,"CELL+",docode
+04dd  0043 0045 004c	  59
+04e0  004c 002b     	  59
+04e2  8822          	  60         add b,1
+04e3  3401 88a2 0381	  61         next
+04e6                	  62 
+04e6                	  63 ;C CELLS    n1 -- n2            cells->adrs units
+04e6  04dc 0000 0005	  64     head CELLS,"CELLS",docode
+04e9  0043 0045 004c	  64
+04ec  004c 0053     	  64
+04ee  3401 88a2 0381	  65         next
+04f1                	  66 
+04f1                	  67 ;C CHAR+    c-addr1 -- c-addr2   add char size
+04f1  04e8 0000 0005	  68     head CHARPLUS,"CHAR+",docode
+04f4  0043 0048 0041	  68
+04f7  0052 002b     	  68
+04f9  8822          	  69         add b,1
+04fa  3401 88a2 0381	  70 	      next
+04fd                	  71 
+04fd                	  72 ;C CHARS    n1 -- n2            chars->adrs units
+04fd  04f3 0000 0005	  73     head CHARS,"CHARS",docode
+0500  0043 0048 0041	  73
+0503  0052 0053     	  73
+0505  3401 88a2 0381	  74         next
+0508                	  75 
+0508                	  76 ;C >BODY    xt -- a-addr      adrs of param field
+0508                	  77 ;   2 + ;                     DCPU-16 (2 word JSR)
+0508  04ff 0000 0005	  78     head TOBODY,">BODY",docode
+050b  003e 0042 004f	  78
+050e  0044 0059     	  78
+0510  8c22          	  79         add b,2
+0511  3401 88a2 0381	  80         next
+0514                	  81 
+0514                	  82 ;X COMPILE,  xt --         append execution token
+0514                	  83 ; I called this word ,XT before I discovered that
+0514                	  84 ; it is defined in the ANSI standard as COMPILE,.
+0514                	  85 ; On a DTC Forth this simply appends xt (like , )
+0514                	  86 ; but on an STC Forth this must append 'CALL xt'.
+0514  050a 0000 0008	  87     head COMMAXT,'COMPILE,',docode
+0517  0043 004f 004d	  87
+051a  0050 0049 004c	  87
+051d  0045 002c     	  87
+051f  7f81 0943     	  88         set pc,COMMA
+0521                	  89 
+0521                	  90 ;Z !CF    adrs cfa --   set code action of a word
+0521                	  91 ;   7C20 OVER !         store 'JSR adrs' instr
+0521                	  92 ;   1+ ! ;              DCPU-16 VERSION
+0521                	  93 ; Depending on the implementation this could
+0521                	  94 ; append CALL adrs or JUMP adrs.
+0521  0516 0000 0003	  95     head STORECF,"!CF",docolon
+0524  0021 0043 0046	  95
+0527  7c20 0034     	  95
+0529  0021 7c20 01e6	  96         DAT LIT,0x7c20,OVER,STORE
+052c  0261          	  96
+052d  02de 0261 0016	  97         DAT ONEPLUS,STORE,EXIT
+0530                	  98 
+0530                	  99 ;Z ,CF    adrs --       append a code field
+0530                	 100 ;   HERE !CF 2 ALLOT ;  DCPU-16 VERSION (2 words)
+0530  0523 0000 0003	 101     head COMMACF,',CF',docolon
+0533  002c 0043 0046	 101
+0536  7c20 0034     	 101
+0538  092d 0527 0021	 102         DAT HERE,STORECF,LIT,2,ALLOT,EXIT
+053b  0002 093a 0016	 102
+053e                	 103 
+053e                	 104 ;Z !COLON   --      change code field to docolon
+053e                	 105 ;   -2 ALLOT docolon-adrs ,CF ;
+053e                	 106 ; This should be used immediately after CREATE.
+053e                	 107 ; This is made a distinct word, because on an STC
+053e                	 108 ; Forth, colon definitions have no code field.
+053e  0532 0000 0006	 109     head STORCOLON,'!COLON',docolon
+0541  0021 0043 004f	 109
+0544  004c 004f 004e	 109
+0547  7c20 0034     	 109
+0549  0021 fffe 093a	 110         DAT LIT,-2,ALLOT
+054c  0021 0034 0536	 111         DAT LIT,docolon,COMMACF,EXIT
+054f  0016          	 111
+0550                	 112 
+0550                	 113 ;Z ,EXIT    --      append hi-level EXIT action
+0550                	 114 ;   ['] EXIT ,XT ;
+0550                	 115 ; This is made a distinct word, because on an STC
+0550                	 116 ; Forth, it appends a RET instruction, not an xt.
+0550  0540 0000 0005	 117     head CEXIT,',EXIT',docolon
+0553  002c 0045 0058	 117
+0556  0049 0054 7c20	 117
+0559  0034          	 117
+055a  0021 0016 051f	 118         DAT LIT,EXIT,COMMAXT,EXIT
+055d  0016          	 118
+055e                	 119 
+055e                	 120 ; CONTROL STRUCTURES ============================
+055e                	 121 ; These words allow Forth control structure words
+055e                	 122 ; to be defined portably.
+055e                	 123 
+055e                	 124 ;Z ,BRANCH   xt --    append a branch instruction
+055e                	 125 ; xt is the branch operator to use, e.g. qbranch
+055e                	 126 ; or (loop).  It does NOT append the destination
+055e                	 127 ; address.  On the Z80 this is equivalent to ,XT.
+055e  0552 0000 0007	 128     head COMMABRANCH,',BRANCH',docode
+0561  002c 0042 0052	 128
+0564  0041 004e 0043	 128
+0567  0048          	 128
+0568  7f81 0943     	 129         set pc,COMMA
+056a                	 130 
+056a                	 131 ;Z ,DEST   dest --        append a branch address
+056a                	 132 ; This appends the given destination address to
+056a                	 133 ; the branch instruction.  On the Z80 this is ','
+056a                	 134 ; ...other CPUs may use relative addressing.
+056a  0560 0000 0005	 135     head COMMADEST,',DEST',docode
+056d  002c 0044 0045	 135
+0570  0053 0054     	 135
+0572  7f81 0943     	 136         set pc,COMMA
+0574                	 137 
+0574                	 138 ;Z !DEST   dest adrs --    change a branch dest'n
+0574                	 139 ; Changes the destination address found at 'adrs'
+0574                	 140 ; to the given 'dest'.  On the Z80 this is '!'
+0574                	 141 ; ...other CPUs may need relative addressing.
+0574  056c 0000 0005	 142     head STOREDEST,'!DEST',docode
+0577  0021 0044 0045	 142
+057a  0053 0054     	 142
+057c  7f81 0261     	 143         set pc,STORE
+057e                	 144 
+057e                	 145 ; HEADER STRUCTURE ==============================
+057e                	 146 ; The structure of the Forth dictionary headers
+057e                	 147 ; (name, link, immediate flag, and "smudge" bit)
+057e                	 148 ; does not necessarily differ across CPUs.  This
+057e                	 149 ; structure is not easily factored into distinct
+057e                	 150 ; "portable" words; instead, it is implicit in
+057e                	 151 ; the definitions of FIND and CREATE, and also in
+057e                	 152 ; NFA>LFA, NFA>CFA, IMMED?, IMMEDIATE, HIDE, and
+057e                	 153 ; REVEAL.  These words must be (substantially)
+057e                	 154 ; rewritten if either the header structure or its
+057e                	 155 ; inherent assumptions are changed.
+057e                	 156 
+057e                	   0         INCLUDE camel16h ; High Level words
+057e                	   1 ; LISTING 2.
+057e                	   2 ;
+057e                	   3 ; ===============================================
+057e                	   4 ; CamelForth for the Mojang DCPU-16 (http://0x10c.com)
+057e                	   5 ; Copyright (c) 2012 Helge Horch
+057e                	   6 ; CamelForth for the Zilog Z80
+057e                	   7 ; Copyright (c) 1994,1995 Bradford J. Rodriguez
+057e                	   8 ;
+057e                	   9 ; This program is free software; you can redistribute it and/or modify
+057e                	  10 ; it under the terms of the GNU General Public License as published by
+057e                	  11 ; the Free Software Foundation; either version 3 of the License, or
+057e                	  12 ; (at your option) any later version.
+057e                	  13 ;
+057e                	  14 ; This program is distributed in the hope that it will be useful,
+057e                	  15 ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+057e                	  16 ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+057e                	  17 ; GNU General Public License for more details.
+057e                	  18 ;
+057e                	  19 ; You should have received a copy of the GNU General Public License
+057e                	  20 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+057e                	  21 
+057e                	  22 ; Commercial inquiries should be directed to the author at 
+057e                	  23 ; 115 First St., #105, Collingwood, Ontario L9Y 4W3 Canada
+057e                	  24 ; or via email to bj@camelforth.com
+057e                	  25 ;
+057e                	  26 ; ===============================================
+057e                	  27 ; CAMEL16H.S: High Level Words
+057e                	  28 ;   Source code is for the ASM assembler.
+057e                	  29 ;   Forth words are documented as follows:
+057e                	  30 ;*   NAME     stack -- stack    description
+057e                	  31 ;   Word names in upper case are from the ANS
+057e                	  32 ;   Forth Core word set.  Names in lower case are
+057e                	  33 ;   "internal" implementation words & extensions.
+057e                	  34 ; ===============================================
+057e                	  35 
+057e                	  36 ; SYSTEM VARIABLES & CONSTANTS ==================
+057e                	  37 
+057e                	  38 ;C BL      -- char            an ASCII space
+057e  0576 0000 0002	  39     head BL,"BL",docon
+0581  0042 004c 7c20	  39
+0584  0063          	  39
+0585  0020          	  40         dw 0x20
+0586                	  41 
+0586                	  42 ;Z tibsize  -- n         size of TIB
+0586  0580 0000 0007	  43     head TIBSIZE,"TIBSIZE",docon
+0589  0054 0049 0042	  43
+058c  0053 0049 005a	  43
+058f  0045 7c20 0063	  43
+0592  0080          	  44         dw 128
+0593                	  45 
+0593                	  46 ;X tib     -- a-addr     Terminal Input Buffer
+0593                	  47 ;  HEX 82 CONSTANT TIB   CP/M systems: 126 bytes
+0593                	  48 ;  HEX -80 USER TIB      others: below user area
+0593                	  49 ;  HEX 80 USER TIB       DCPU-16: upper user area
+0593  0588 0000 0003	  50     head TIB,"TIB",douser
+0596  0054 0049 0042	  50
+0599  7c20 0075     	  50
+059b  0080          	  51         dw 0x80
+059c                	  52 
+059c                	  53 ;Z u0      -- a-addr       current user area adrs
+059c                	  54 ;  0 USER U0
+059c  0595 0000 0002	  55     head U0,"U0",douser
+059f  0055 0030 7c20	  55
+05a2  0075          	  55
+05a3  0000          	  56         dw 0
+05a4                	  57 
+05a4                	  58 ;C >IN     -- a-addr        holds offset into TIB
+05a4                	  59 ;  1 USER >IN
+05a4  059e 0000 0003	  60     head TOIN,">IN",douser
+05a7  003e 0049 004e	  60
+05aa  7c20 0075     	  60
+05ac  0001          	  61         dw 1
+05ad                	  62 
+05ad                	  63 ;C BASE    -- a-addr       holds conversion radix
+05ad                	  64 ;  2 USER BASE
+05ad  05a6 0000 0004	  65     head BASE,"BASE",douser
+05b0  0042 0041 0053	  65
+05b3  0045 7c20 0075	  65
+05b6  0002          	  66         dw 2
+05b7                	  67 
+05b7                	  68 ;C STATE   -- a-addr       holds compiler state
+05b7                	  69 ;  3 USER STATE
+05b7  05af 0000 0005	  70     head STATE,"STATE",douser
+05ba  0053 0054 0041	  70
+05bd  0054 0045 7c20	  70
+05c0  0075          	  70
+05c1  0003          	  71         dw 3
+05c2                	  72 
+05c2                	  73 ;Z dp      -- a-addr       holds dictionary ptr
+05c2                	  74 ;  4 USER DP
+05c2  05b9 0000 0002	  75     head DP,"DP",douser
+05c5  0044 0050 7c20	  75
+05c8  0075          	  75
+05c9  0004          	  76         dw 4
+05ca                	  77 
+05ca                	  78 ;Z 'source  -- a-addr      two cells: len, adrs
+05ca                	  79 ; 5 USER 'SOURCE
+05ca  05c4 0000 0007	  80     head TICKSOURCE,"'SOURCE",douser
+05cd  0027 0053 004f	  80
+05d0  0055 0052 0043	  80
+05d3  0045 7c20 0075	  80
+05d6  0005          	  81         dw 5
+05d7                	  82 
+05d7                	  83 ;Z latest    -- a-addr     last word in dict.
+05d7                	  84 ;   7 USER LATEST
+05d7  05cc 0000 0006	  85     head LATEST,"LATEST",douser
+05da  004c 0041 0054	  85
+05dd  0045 0053 0054	  85
+05e0  7c20 0075     	  85
+05e2  0007          	  86         dw 7
+05e3                	  87 
+05e3                	  88 ;Z hp       -- a-addr     HOLD pointer
+05e3                	  89 ;   8 USER HP
+05e3  05d9 0000 0002	  90     head HP,"HP",douser
+05e6  0048 0050 7c20	  90
+05e9  0075          	  90
+05ea  0008          	  91         dw 8
+05eb                	  92 
+05eb                	  93 ;Z LP       -- a-addr     Leave-stack pointer
+05eb                	  94 ;   9 USER LP
+05eb  05e5 0000 0002	  95     head LP,"LP",douser
+05ee  004c 0050 7c20	  95
+05f1  0075          	  95
+05f2  0009          	  96         dw 9
+05f3                	  97 
+05f3                	  98 ;Z s0       -- a-addr     end of parameter stack
+05f3  05ed 0000 0002	  99     head S0,"S0",douser
+05f6  0053 0030 7c20	  99
+05f9  0075          	  99
+05fa  0400          	 100         dw 0x400
+05fb                	 101 
+05fb                	 102 ;X PAD       -- a-addr    user PAD buffer
+05fb                	 103 ;                         = end of hold area!
+05fb  05f5 0000 0003	 104     head PAD,"PAD",douser
+05fe  0050 0041 0044	 104
+0601  7c20 0075     	 104
+0603  0128          	 105         dw 0x128
+0604                	 106 
+0604                	 107 ;Z l0       -- a-addr     bottom of Leave stack
+0604  05fd 0000 0002	 108     head L0,"L0",douser
+0607  004c 0030 7c20	 108
+060a  0075          	 108
+060b  0180          	 109         dw 0x180
+060c                	 110 
+060c                	 111 ;Z r0       -- a-addr     end of return stack
+060c  0606 0000 0002	 112     head R0,"R0",douser
+060f  0052 0030 7c20	 112
+0612  0075          	 112
+0613  0300          	 113         dw 0x300
+0614                	 114 
+0614                	 115 ;Z uinit    -- addr  initial values for user area
+0614  060e 0000 0005	 116     head UINIT,"UINIT",docreate
+0617  0055 0049 004e	 116
+061a  0049 0054 7c20	 116
+061d  004d          	 116
+061e  0000 0000 000a	 117         DW 0,0,10,0     ; reserved,>IN,BASE,STATE
+0621  0000          	 117
+0622  0e0e          	 118         DW enddict      ; DP
+0623  0000 0000     	 119         DW 0,0          ; SOURCE init'd elsewhere
+0625  0de6          	 120         DW lastword     ; LATEST
+0626  0000          	 121         DW 0            ; HP init'd elsewhere
+0627                	 122 
+0627                	 123 ;Z #init    -- n    #bytes of user area init data
+0627  0616 0000 0005	 124     head NINIT,"#INIT",docon
+062a  0023 0049 004e	 124
+062d  0049 0054 7c20	 124
+0630  0063          	 124
+0631  0009          	 125         DW 9
+0632                	 126 
+0632                	 127 ; ARITHMETIC OPERATORS ==========================
+0632                	 128 
+0632                	 129 ;C S>D    n -- d          single -> double prec.
+0632                	 130 ;   DUP 0< ;
+0632  0629 0000 0003	 131     head STOD,"S>D",docolon
+0635  0053 003e 0044	 131
+0638  7c20 0034     	 131
+063a  01b7 033f 0016	 132         dw DUP,ZEROLESS,EXIT
+063d                	 133 
+063d                	 134 ;Z ?NEGATE  n1 n2 -- n3  negate n1 if n2 negative
+063d                	 135 ;   0< IF NEGATE THEN ;        ...a common factor
+063d  0634 0000 0007	 136     head QNEGATE,"?NEGATE",docolon
+0640  003f 004e 0045	 136
+0643  0047 0041 0054	 136
+0646  0045 7c20 0034	 136
+0649  033f 039b 064d	 137         DW ZEROLESS,qbranch,QNEG1,NEGATE
+064c  02d4          	 137
+064d  0016          	 138 :QNEG1  DW EXIT
+064e                	 139 
+064e                	 140 ;C ABS     n1 -- +n2     absolute value
+064e                	 141 ;   DUP ?NEGATE ;
+064e  063f 0000 0003	 142     head ABS,"ABS",docolon
+0651  0041 0042 0053	 142
+0654  7c20 0034     	 142
+0656  01b7 0647 0016	 143         DW DUP,QNEGATE,EXIT
+0659                	 144 
+0659                	 145 ;X DNEGATE   d1 -- d2     negate double precision
+0659                	 146 ;   SWAP INVERT SWAP INVERT 1 M+ ;
+0659  0650 0000 0007	 147     head DNEGATE,"DNEGATE",docolon
+065c  0044 004e 0045	 147
+065f  0047 0041 0054	 147
+0662  0045 7c20 0034	 147
+0665  01d9 02c7 01d9	 148         DW SWOP,INVERT,SWOP,INVERT,LIT,1,MPLUS
+0668  02c7 0021 0001	 148
+066b  0290          	 148
+066c  0016          	 149         DW EXIT
+066d                	 150 
+066d                	 151 ;Z ?DNEGATE  d1 n -- d2   negate d1 if n negative
+066d                	 152 ;   0< IF DNEGATE THEN ;       ...a common factor
+066d  065b 0000 0008	 153     head QDNEGATE,"?DNEGATE",docolon
+0670  003f 0044 004e	 153
+0673  0045 0047 0041	 153
+0676  0054 0045 7c20	 153
+0679  0034          	 153
+067a  033f 039b 067e	 154         DW ZEROLESS,qbranch,DNEG1,DNEGATE
+067d  0663          	 154
+067e  0016          	 155 :DNEG1  DW EXIT
+067f                	 156 
+067f                	 157 ;X DABS     d1 -- +d2    absolute value dbl.prec.
+067f                	 158 ;   DUP ?DNEGATE ;
+067f  066f 0000 0004	 159     head DABS,"DABS",docolon
+0682  0044 0041 0042	 159
+0685  0053 7c20 0034	 159
+0688  01b7 0678 0016	 160         DW DUP,QDNEGATE,EXIT
+068b                	 161 
+068b                	 162 ;C M*     n1 n2 -- d    signed 16*16->32 multiply
+068b                	 163 ;   2DUP XOR >R        carries sign of the result
+068b                	 164 ;   SWAP ABS SWAP ABS UM*
+068b                	 165 ;   R> ?DNEGATE ;
+068b  0681 0000 0002	 166     head MSTAR,"M*",docolon
+068e  004d 002a 7c20	 166
+0691  0034          	 166
+0692  0765 02ba 0216	 167         DW TWODUP,XOR,TOR
+0695  01d9 0654 01d9	 168         DW SWOP,ABS,SWOP,ABS,UMSTAR
+0698  0654 0406     	 168
+069a  0221 0678 0016	 169         DW RFROM,QDNEGATE,EXIT
+069d                	 170 
+069d                	 171 ;C SM/REM   d1 n1 -- n2 n3   symmetric signed div
+069d                	 172 ;   2DUP XOR >R              sign of quotient
+069d                	 173 ;   OVER >R                  sign of remainder
+069d                	 174 ;   ABS >R DABS R> UM/MOD
+069d                	 175 ;   SWAP R> ?NEGATE
+069d                	 176 ;   SWAP R> ?NEGATE ;
+069d                	 177 ; Ref. dpANS-6 section 3.2.2.1.
+069d  068d 0000 0006	 178     head SMSLASHREM,"SM/REM",docolon
+06a0  0053 004d 002f	 178
+06a3  0052 0045 004d	 178
+06a6  7c20 0034     	 178
+06a8  0765 02ba 0216	 179         DW TWODUP,XOR,TOR,OVER,TOR
+06ab  01e6 0216     	 179
+06ad  0654 0216 0686	 180         DW ABS,TOR,DABS,RFROM,UMSLASHMOD
+06b0  0221 0415     	 180
+06b2  01d9 0221 0647	 181         DW SWOP,RFROM,QNEGATE,SWOP,RFROM,QNEGATE
+06b5  01d9 0221 0647	 181
+06b8  0016          	 182         DW EXIT
+06b9                	 183 
+06b9                	 184 ;C FM/MOD   d1 n1 -- n2 n3   floored signed div'n
+06b9                	 185 ;   DUP >R              save divisor
+06b9                	 186 ;   SM/REM
+06b9                	 187 ;   DUP 0< IF           if quotient negative,
+06b9                	 188 ;       SWAP R> +         add divisor to rem'dr
+06b9                	 189 ;       SWAP 1-           decrement quotient
+06b9                	 190 ;   ELSE R> DROP THEN ;
+06b9                	 191 ; Ref. dpANS-6 section 3.2.2.1.
+06b9  069f 0000 0006	 192     head FMSLASHMOD,"FM/MOD",docolon
+06bc  0046 004d 002f	 192
+06bf  004d 004f 0044	 192
+06c2  7c20 0034     	 192
+06c4  01b7 0216 06a6	 193         DW DUP,TOR,SMSLASHREM
+06c7  01b7 033f 039b	 194         DW DUP,ZEROLESS,qbranch,FMMOD1
+06ca  06d2          	 194
+06cb  01d9 0221 0287	 195         DW SWOP,RFROM,PLUS,SWOP,ONEMINUS
+06ce  01d9 02e7     	 195
+06d0  038d 06d4     	 196         DW branch,FMMOD2
+06d2  0221 01ce     	 197 :FMMOD1 DW RFROM,DROP
+06d4  0016          	 198 :FMMOD2 DW EXIT
+06d5                	 199 
+06d5                	 200 ;C *      n1 n2 -- n3       signed multiply
+06d5                	 201 ;   M* DROP ;
+06d5  06bb 0000 0001	 202     head STAR,"*",docolon
+06d8  002a 7c20 0034	 202
+06db  0690 01ce 0016	 203         dw MSTAR,DROP,EXIT
+06de                	 204 
+06de                	 205 ;C /MOD   n1 n2 -- n3 n4    signed divide/rem'dr
+06de                	 206 ;   >R S>D R> FM/MOD ;
+06de  06d7 0000 0004	 207     head SLASHMOD,"/MOD",docolon
+06e1  002f 004d 004f	 207
+06e4  0044 7c20 0034	 207
+06e7  0216 0638 0221	 208         dw TOR,STOD,RFROM,FMSLASHMOD,EXIT
+06ea  06c2 0016     	 208
+06ec                	 209 
+06ec                	 210 ;C /      n1 n2 -- n3       signed divide
+06ec                	 211 ;   /MOD nip ;
+06ec  06e0 0000 0001	 212     head SLASH,"/",docolon
+06ef  002f 7c20 0034	 212
+06f2  06e5 0200 0016	 213         dw SLASHMOD,NIP,EXIT
+06f5                	 214 
+06f5                	 215 ;C MOD    n1 n2 -- n3       signed remainder
+06f5                	 216 ;   /MOD DROP ;
+06f5  06ee 0000 0003	 217     head MOD,"MOD",docolon
+06f8  004d 004f 0044	 217
+06fb  7c20 0034     	 217
+06fd  06e5 01ce 0016	 218         dw SLASHMOD,DROP,EXIT
+0700                	 219 
+0700                	 220 ;C */MOD  n1 n2 n3 -- n4 n5    n1*n2/n3, rem&quot
+0700                	 221 ;   >R M* R> FM/MOD ;
+0700  06f7 0000 0005	 222     head SSMOD,"*/MOD",docolon
+0703  002a 002f 004d	 222
+0706  004f 0044 7c20	 222
+0709  0034          	 222
+070a  0216 0690 0221	 223         dw TOR,MSTAR,RFROM,FMSLASHMOD,EXIT
+070d  06c2 0016     	 223
+070f                	 224 
+070f                	 225 ;C */     n1 n2 n3 -- n4        n1*n2/n3
+070f                	 226 ;   */MOD nip ;
+070f  0702 0000 0002	 227     head STARSLASH,"*/",docolon
+0712  002a 002f 7c20	 227
+0715  0034          	 227
+0716  0708 0200 0016	 228         dw SSMOD,NIP,EXIT
+0719                	 229 
+0719                	 230 ;C MAX    n1 n2 -- n3       signed maximum
+0719                	 231 ;   2DUP < IF SWAP THEN DROP ;
+0719  0711 0000 0003	 232     head MAX,"MAX",docolon
+071c  004d 0041 0058	 232
+071f  7c20 0034     	 232
+0721  0765 0361 039b	 233         dw TWODUP,LESS,qbranch,MAX1,SWOP
+0724  0726 01d9     	 233
+0726  01ce 0016     	 234 :MAX1   dw DROP,EXIT
+0728                	 235 
+0728                	 236 ;C MIN    n1 n2 -- n3       signed minimum
+0728                	 237 ;   2DUP > IF SWAP THEN DROP ;
+0728  071b 0000 0003	 238     head MIN,"MIN",docolon
+072b  004d 0049 004e	 238
+072e  7c20 0034     	 238
+0730  0765 036b 039b	 239         dw TWODUP,GREATER,qbranch,MIN1,SWOP
+0733  0735 01d9     	 239
+0735  01ce 0016     	 240 :MIN1   dw DROP,EXIT
+0737                	 241 
+0737                	 242 ; DOUBLE OPERATORS ==============================
+0737                	 243 
+0737                	 244 ;C 2@    a-addr -- x1 x2    fetch 2 cells
+0737                	 245 ;   DUP CELL+ @ SWAP @ ;
+0737                	 246 ;   the lower address will appear on top of stack
+0737  072a 0000 0002	 247     head TWOFETCH,"2@",docolon
+073a  0032 0040 7c20	 247
+073d  0034          	 247
+073e  01b7 04e2 0276	 248         dw DUP,CELLPLUS,FETCH,SWOP,FETCH,EXIT
+0741  01d9 0276 0016	 248
+0744                	 249 
+0744                	 250 ;C 2!    x1 x2 a-addr --    store 2 cells
+0744                	 251 ;   SWAP OVER ! CELL+ ! ;
+0744                	 252 ;   the top of stack is stored at the lower adrs
+0744  0739 0000 0002	 253     head TWOSTORE,"2!",docolon
+0747  0032 0021 7c20	 253
+074a  0034          	 253
+074b  01d9 01e6 0261	 254         dw SWOP,OVER,STORE,CELLPLUS,STORE,EXIT
+074e  04e2 0261 0016	 254
+0751                	 255 
+0751                	 256 ;C 2DROP  x1 x2 --          drop 2 cells
+0751                	 257 ;   DROP DROP ;
+0751  0746 0000 0005	 258     head TWODROP,"2DROP",docolon
+0754  0032 0044 0052	 258
+0757  004f 0050 7c20	 258
+075a  0034          	 258
+075b  01ce 01ce 0016	 259         dw DROP,DROP,EXIT
+075e                	 260 
+075e                	 261 ;C 2DUP   x1 x2 -- x1 x2 x1 x2   dup top 2 cells
+075e                	 262 ;   OVER OVER ;
+075e  0753 0000 0004	 263     head TWODUP,"2DUP",docolon
+0761  0032 0044 0055	 263
+0764  0050 7c20 0034	 263
+0767  01e6 01e6 0016	 264         dw OVER,OVER,EXIT
+076a                	 265 
+076a                	 266 ;C 2SWAP  x1 x2 x3 x4 -- x3 x4 x1 x2  per diagram
+076a                	 267 ;   ROT >R ROT R> ;
+076a  0760 0000 0005	 268     head TWOSWAP,"2SWAP",docolon
+076d  0032 0053 0057	 268
+0770  0041 0050 7c20	 268
+0773  0034          	 268
+0774  01f2 0216 01f2	 269         dw ROT,TOR,ROT,RFROM,EXIT
+0777  0221 0016     	 269
+0779                	 270 
+0779                	 271 ;C 2OVER  x1 x2 x3 x4 -- x1 x2 x3 x4 x1 x2
+0779                	 272 ;   >R >R 2DUP R> R> 2SWAP ;
+0779  076c 0000 0005	 273     head TWOOVER,"2OVER",docolon
+077c  0032 004f 0056	 273
+077f  0045 0052 7c20	 273
+0782  0034          	 273
+0783  0216 0216 0765	 274         dw TOR,TOR,TWODUP,RFROM,RFROM
+0786  0221 0221     	 274
+0788  0772 0016     	 275         dw TWOSWAP,EXIT
+078a                	 276 
+078a                	 277 ; INPUT/OUTPUT ==================================
+078a                	 278 
+078a                	 279 ;C COUNT   c-addr1 -- c-addr2 u  counted->adr/len
+078a                	 280 ;   DUP CHAR+ SWAP C@ ;
+078a  077b 0000 0005	 281     head COUNT,"COUNT",docolon
+078d  0043 004f 0055	 281
+0790  004e 0054 7c20	 281
+0793  0034          	 281
+0794  01b7 04f9 01d9	 282         dw DUP,CHARPLUS,SWOP,CFETCH,EXIT
+0797  027f 0016     	 282
+0799                	 283 
+0799                	 284 ;C SPACE   --               output a space
+0799                	 285 ;   BL EMIT ;
+0799  078c 0000 0005	 286     head SPACE,"SPACE",docolon
+079c  0053 0050 0041	 286
+079f  0043 0045 7c20	 286
+07a2  0034          	 286
+07a3  0583 00ff 0016	 287         dw BL,EMIT,EXIT
+07a6                	 288 
+07a6                	 289 ;C SPACES   n --            output n spaces
+07a6                	 290 ;   BEGIN DUP WHILE SPACE 1- REPEAT DROP ;
+07a6  079b 0000 0006	 291     head SPACES,"SPACES",docolon
+07a9  0053 0050 0041	 291
+07ac  0043 0045 0053	 291
+07af  7c20 0034     	 291
+07b1  01b7 039b 07b8	 292 :SPCS1  DW DUP,qbranch,SPCS2
+07b4  07a1 02e7 038d	 293         DW SPACE,ONEMINUS,branch,SPCS1
+07b7  07b1          	 293
+07b8  01ce 0016     	 294 :SPCS2  DW DROP,EXIT
+07ba                	 295 
+07ba                	 296 ;Z umin     u1 u2 -- u      unsigned minimum
+07ba                	 297 ;   2DUP U> IF SWAP THEN DROP ;
+07ba  07a8 0000 0004	 298     head UMIN,"UMIN",docolon
+07bd  0055 004d 0049	 298
+07c0  004e 7c20 0034	 298
+07c3  0765 037f 039b	 299         DW TWODUP,UGREATER,QBRANCH,UMIN1,SWOP
+07c6  07c8 01d9     	 299
+07c8  01ce 0016     	 300 :UMIN1  DW DROP,EXIT
+07ca                	 301 
+07ca                	 302 ;Z umax    u1 u2 -- u       unsigned maximum
+07ca                	 303 ;   2DUP U< IF SWAP THEN DROP ;
+07ca  07bc 0000 0004	 304     head UMAX,"UMAX",docolon
+07cd  0055 004d 0041	 304
+07d0  0058 7c20 0034	 304
+07d3  0765 0375 039b	 305         DW TWODUP,ULESS,QBRANCH,UMAX1,SWOP
+07d6  07d8 01d9     	 305
+07d8  01ce 0016     	 306 :UMAX1  DW DROP,EXIT
+07da                	 307 
+07da                	 308 ;C ACCEPT  c-addr +n -- +n'  get line from term'l
+07da                	 309 ;   OVER + 1- OVER      -- sa ea a
+07da                	 310 ;   BEGIN KEY           -- sa ea a c
+07da                	 311 ;   DUP 0D <> WHILE
+07da                	 312 ;       DUP EMIT        -- sa ea a c
+07da                	 313 ;       DUP 8 = IF  DROP 1-    >R OVER R> UMAX
+07da                	 314 ;             ELSE  OVER C! 1+ OVER UMIN
+07da                	 315 ;       THEN            -- sa ea a
+07da                	 316 ;   REPEAT              -- sa ea a c
+07da                	 317 ;   DROP NIP SWAP - ;
+07da  07cc 0000 0006	 318     head ACCEPT,"ACCEPT",docolon
+07dd  0041 0043 0043	 318
+07e0  0045 0050 0054	 318
+07e3  7c20 0034     	 318
+07e5  01e6 0287 02e7	 319         DW OVER,PLUS,ONEMINUS,OVER
+07e8  01e6          	 319
+07e9  0197 01b7 0021	 320 :ACC1   DW KEY,DUP,LIT,0x0D,NOTEQUAL,QBRANCH,ACC5
+07ec  000d 0358 039b	 320
+07ef  0807          	 320
+07f0  01b7 00ff 01b7	 321         DW DUP,EMIT,DUP,LIT,8,EQUAL,QBRANCH,ACC3
+07f3  0021 0008 034e	 321
+07f6  039b 0800     	 321
+07f8  01ce 02e7 0216	 322         DW DROP,ONEMINUS,TOR,OVER,RFROM,UMAX
+07fb  01e6 0221 07d1	 322
+07fe  038d 0805     	 323         DW BRANCH,ACC4
+0800  01e6 026c 02de	 324 :ACC3   DW OVER,CSTORE,ONEPLUS,OVER,UMIN
+0803  01e6 07c1     	 324
+0805  038d 07e9     	 325 :ACC4   DW BRANCH,ACC1
+0807  01ce 0200 01d9	 326 :ACC5   DW DROP,NIP,SWOP,MINUS,EXIT
+080a  029b 0016     	 326
+080c                	 327 
+080c                	 328 ;C TYPE    c-addr +n --     type line to term'l
+080c                	 329 ;   ?DUP IF
+080c                	 330 ;     OVER + SWAP DO I C@ EMIT LOOP
+080c                	 331 ;   ELSE DROP THEN ;
+080c  07dc 0000 0004	 332     head TYPE,"TYPE",docolon
+080f  0054 0059 0050	 332
+0812  0045 7c20 0034	 332
+0815  01c2 039b 0823	 333         DW QDUP,QBRANCH,TYP4
+0818  01e6 0287 01d9	 334         DW OVER,PLUS,SWOP,XDO
+081b  03ab          	 334
+081c  03e0 027f 00ff	 335 :TYP3   DW II,CFETCH,EMIT,XLOOP,TYP3
+081f  03c0 081c     	 335
+0821  038d 0824     	 336         DW BRANCH,TYP5
+0823  01ce          	 337 :TYP4   DW DROP
+0824  0016          	 338 :TYP5   DW EXIT
+0825                	 339 
+0825                	 340 ;Z (S")     -- c-addr u   run-time code for S"
+0825                	 341 ;   R> COUNT 2DUP + ALIGNED >R  ;
+0825  080e 0000 0004	 342     head XSQUOTE,'(S")',docolon
+0828  0028 0053 0022	 342
+082b  0029 7c20 0034	 342
+082e  0221 0792 0765	 343         DW RFROM,COUNT,TWODUP,PLUS,ALIGNED,TOR
+0831  0287 04cd 0216	 343
+0834  0016          	 344         DW EXIT
+0835                	 345 
+0835                	 346 ;C S"       --         compile in-line string
+0835                	 347 ;   COMPILE (S")  [ HEX ]
+0835                	 348 ;   22 WORD C@ 1+ ALIGNED ALLOT ; IMMEDIATE
+0835  0827 0001 0002	 349     immed SQUOTE,'S"',docolon
+0838  0053 0022 7c20	 349
+083b  0034          	 349
+083c  0021 082c 051f	 350         DW LIT,XSQUOTE,COMMAXT
+083f  0021 0022 0995	 351         DW LIT,0x22,WORD,CFETCH,ONEPLUS
+0842  027f 02de     	 351
+0844  04cd 093a 0016	 352         DW ALIGNED,ALLOT,EXIT
+0847                	 353 
+0847                	 354 ;C ."       --         compile string to print
+0847                	 355 ;   POSTPONE S"  POSTPONE TYPE ; IMMEDIATE
+0847  0837 0001 0002	 356     immed DOTQUOTE,'."',docolon
+084a  002e 0022 7c20	 356
+084d  0034          	 356
+084e  083a          	 357         DW SQUOTE
+084f  0021 0813 051f	 358         DW LIT,TYPE,COMMAXT
+0852  0016          	 359         DW EXIT
+0853                	 360                         
+0853                	 361 ; NUMERIC OUTPUT ================================
+0853                	 362 ; Numeric conversion is done l.s.digit first, so
+0853                	 363 ; the output buffer is built backwards in memory.
+0853                	 364 
+0853                	 365 ; Some double-precision arithmetic operators are
+0853                	 366 ; needed to implement ANSI numeric conversion.
+0853                	 367 
+0853                	 368 ;Z UD/MOD   ud1 u2 -- u3 ud4   32/16->32 divide
+0853                	 369 ;   >R 0 R@ UM/MOD  ROT ROT R> UM/MOD ROT ;
+0853  0849 0000 0006	 370     head UDSLASHMOD,"UD/MOD",docolon
+0856  0055 0044 002f	 370
+0859  004d 004f 0044	 370
+085c  7c20 0034     	 370
+085e  0216 0021 0000	 371         DW TOR,LIT,0,RFETCH,UMSLASHMOD,ROT,ROT
+0861  022c 0415 01f2	 371
+0864  01f2          	 371
+0865  0221 0415 01f2	 372         DW RFROM,UMSLASHMOD,ROT,EXIT
+0868  0016          	 372
+0869                	 373 
+0869                	 374 ;Z UD*      ud1 d2 -- ud3      32*16->32 multiply
+0869                	 375 ;   DUP >R UM* DROP  SWAP R> UM* ROT + ;
+0869  0855 0000 0003	 376     head UDSTAR,"UD*",docolon
+086c  0055 0044 002a	 376
+086f  7c20 0034     	 376
+0871  01b7 0216 0406	 377         DW DUP,TOR,UMSTAR,DROP
+0874  01ce          	 377
+0875  01d9 0221 0406	 378         DW SWOP,RFROM,UMSTAR,ROT,PLUS,EXIT
+0878  01f2 0287 0016	 378
+087b                	 379 
+087b                	 380 ;C HOLD  char --        add char to output string
+087b                	 381 ;   -1 HP +!  HP @ C! ;
+087b  086b 0000 0004	 382     head HOLD,"HOLD",docolon
+087e  0048 004f 004c	 382
+0881  0044 7c20 0034	 382
+0884  0021 ffff 05e8	 383         DW LIT,-1,HP,PLUSSTORE
+0887  032a          	 383
+0888  05e8 0276 026c	 384         DW HP,FETCH,CSTORE,EXIT
+088b  0016          	 384
+088c                	 385 
+088c                	 386 ;C <#    --             begin numeric conversion
+088c                	 387 ;   PAD HP ! ;          (initialize Hold Pointer)
+088c  087d 0000 0002	 388     head LESSNUM,"<#",docolon
+088f  003c 0023 7c20	 388
+0892  0034          	 388
+0893  0601 05e8 0261	 389         DW PAD,HP,STORE,EXIT
+0896  0016          	 389
+0897                	 390 
+0897                	 391 ;Z >digit   n -- c      convert to 0..9A..Z
+0897                	 392 ;   [ HEX ] DUP 9 > 7 AND + 30 + ;
+0897  088e 0000 0006	 393     head TODIGIT,">DIGIT",docolon
+089a  003e 0044 0049	 393
+089d  0047 0049 0054	 393
+08a0  7c20 0034     	 393
+08a2  01b7 0021 0009	 394         DW DUP,LIT,9,GREATER,LIT,7,AND,PLUS
+08a5  036b 0021 0007	 394
+08a8  02a7 0287     	 394
+08aa  0021 0030 0287	 395         DW LIT,0x30,PLUS,EXIT
+08ad  0016          	 395
+08ae                	 396 
+08ae                	 397 ;C #     ud1 -- ud2     convert 1 digit of output
+08ae                	 398 ;   BASE @ UD/MOD ROT >digit HOLD ;
+08ae  0899 0000 0001	 399     head NUM,"#",docolon
+08b1  0023 7c20 0034	 399
+08b4  05b4 0276 085c	 400         DW BASE,FETCH,UDSLASHMOD,ROT,TODIGIT
+08b7  01f2 08a0     	 400
+08b9  0882 0016     	 401         DW HOLD,EXIT
+08bb                	 402 
+08bb                	 403 ;C #S    ud1 -- ud2     convert remaining digits
+08bb                	 404 ;   BEGIN # 2DUP OR 0= UNTIL ;
+08bb  08b0 0000 0002	 405     head NUMS,"#S",docolon
+08be  0023 0053 7c20	 405
+08c1  0034          	 405
+08c2  08b2 0765 02b0	 406 :NUMS1  DW NUM,TWODUP,OR,ZEROEQUAL,qbranch,NUMS1
+08c5  0334 039b 08c2	 406
+08c8  0016          	 407         DW EXIT
+08c9                	 408 
+08c9                	 409 ;C #>    ud1 -- c-addr u    end conv., get string
+08c9                	 410 ;   2DROP HP @ PAD OVER - ;
+08c9  08bd 0000 0002	 411     head NUMGREATER,"#>",docolon
+08cc  0023 003e 7c20	 411
+08cf  0034          	 411
+08d0  0759 05e8 0276	 412         DW TWODROP,HP,FETCH,PAD,OVER,MINUS,EXIT
+08d3  0601 01e6 029b	 412
+08d6  0016          	 412
+08d7                	 413 
+08d7                	 414 ;C SIGN  n --           add minus sign if n<0
+08d7                	 415 ;   0< IF 2D HOLD THEN ;
+08d7  08cb 0000 0004	 416     head SIGN,"SIGN",docolon
+08da  0053 0049 0047	 416
+08dd  004e 7c20 0034	 416
+08e0  033f 039b 08e6	 417         DW ZEROLESS,qbranch,SIGN1,LIT,0x2D,HOLD
+08e3  0021 002d 0882	 417
+08e6  0016          	 418 :SIGN1  DW EXIT
+08e7                	 419 
+08e7                	 420 ;C U.    u --           display u unsigned
+08e7                	 421 ;   <# 0 #S #> TYPE SPACE ;
+08e7  08d9 0000 0002	 422     head UDOT,"U.",docolon
+08ea  0055 002e 7c20	 422
+08ed  0034          	 422
+08ee  0891 0021 0000	 423         DW LESSNUM,LIT,0,NUMS,NUMGREATER,TYPE
+08f1  08c0 08ce 0813	 423
+08f4  07a1 0016     	 424         DW SPACE,EXIT
+08f6                	 425 
+08f6                	 426 ;C .     n --           display n signed
+08f6                	 427 ;   <# DUP ABS 0 #S ROT SIGN #> TYPE SPACE ;
+08f6  08e9 0000 0001	 428     head DOT,'.',docolon
+08f9  002e 7c20 0034	 428
+08fc  0891 01b7 0654	 429         DW LESSNUM,DUP,ABS,LIT,0,NUMS
+08ff  0021 0000 08c0	 429
+0902  01f2 08de 08ce	 430         DW ROT,SIGN,NUMGREATER,TYPE,SPACE,EXIT
+0905  0813 07a1 0016	 430
+0908                	 431 
+0908                	 432 ;C DECIMAL  --      set number base to decimal
+0908                	 433 ;   10 BASE ! ;
+0908  08f8 0000 0007	 434     head DECIMAL,"DECIMAL",docolon
+090b  0044 0045 0043	 434
+090e  0049 004d 0041	 434
+0911  004c 7c20 0034	 434
+0914  0021 000a 05b4	 435         DW LIT,10,BASE,STORE,EXIT
+0917  0261 0016     	 435
+0919                	 436 
+0919                	 437 ;X HEX     --       set number base to hex
+0919                	 438 ;   16 BASE ! ;
+0919  090a 0000 0003	 439     head HEX,"HEX",docolon
+091c  0048 0045 0058	 439
+091f  7c20 0034     	 439
+0921  0021 0010 05b4	 440         DW LIT,16,BASE,STORE,EXIT
+0924  0261 0016     	 440
+0926                	 441 
+0926                	 442 ; DICTIONARY MANAGEMENT =========================
+0926                	 443 
+0926                	 444 ;C HERE    -- addr      returns dictionary ptr
+0926                	 445 ;   DP @ ;
+0926  091b 0000 0004	 446     head HERE,"HERE",docolon
+0929  0048 0045 0052	 446
+092c  0045 7c20 0034	 446
+092f  05c7 0276 0016	 447         dw DP,FETCH,EXIT
+0932                	 448 
+0932                	 449 ;C ALLOT   n --         allocate n bytes in dict
+0932                	 450 ;   DP +! ;
+0932  0928 0000 0005	 451     head ALLOT,"ALLOT",docolon
+0935  0041 004c 004c	 451
+0938  004f 0054 7c20	 451
+093b  0034          	 451
+093c  05c7 032a 0016	 452         dw DP,PLUSSTORE,EXIT
+093f                	 453 
+093f                	 454 ; Note: , and C, are only valid for combined
+093f                	 455 ; Code and Data spaces.
+093f                	 456 
+093f                	 457 ;C ,    x --           append cell to dict
+093f                	 458 ;   HERE ! 1 CELLS ALLOT ;
+093f  0934 0000 0001	 459     head COMMA,',',docolon
+0942  002c 7c20 0034	 459
+0945  092d 0261 0021	 460         dw HERE,STORE,lit,1,CELLS,ALLOT,EXIT
+0948  0001 04ee 093a	 460
+094b  0016          	 460
+094c                	 461 
+094c                	 462 ;C C,   char --        append char to dict
+094c                	 463 ;   HERE C! 1 CHARS ALLOT ;
+094c  0941 0000 0002	 464     head CCOMMA,'C,',docolon
+094f  0043 002c 7c20	 464
+0952  0034          	 464
+0953  092d 026c 0021	 465         dw HERE,CSTORE,lit,1,CHARS,ALLOT,EXIT
+0956  0001 0505 093a	 465
+0959  0016          	 465
+095a                	 466 
+095a                	 467 ; INTERPRETER ===================================
+095a                	 468 ; Note that NFA>LFA, NFA>CFA, IMMED?, and FIND
+095a                	 469 ; are dependent on the structure of the Forth
+095a                	 470 ; header.  This may be common across many CPUs,
+095a                	 471 ; or it may be different.
+095a                	 472 
+095a                	 473 ;C SOURCE   -- adr n    current input buffer
+095a                	 474 ;   'SOURCE 2@ ;        length is at lower adrs
+095a  094e 0000 0006	 475     head SOURCE,"SOURCE",docolon
+095d  0053 004f 0055	 475
+0960  0052 0043 0045	 475
+0963  7c20 0034     	 475
+0965  05d4 073c 0016	 476         DW TICKSOURCE,TWOFETCH,EXIT
+0968                	 477 
+0968                	 478 ;X /STRING  a u n -- a+n u-n   trim string
+0968                	 479 ;   ROT OVER + ROT ROT - ;
+0968  095c 0000 0007	 480     head SLASHSTRING,"/STRING",docolon
+096b  002f 0053 0054	 480
+096e  0052 0049 004e	 480
+0971  0047 7c20 0034	 480
+0974  01f2 01e6 0287	 481         DW ROT,OVER,PLUS,ROT,ROT,MINUS,EXIT
+0977  01f2 01f2 029b	 481
+097a  0016          	 481
+097b                	 482 
+097b                	 483 ;Z >counted  src n dst --     copy to counted str
+097b                	 484 ;   2DUP C! CHAR+ SWAP CMOVE ;
+097b  096a 0000 0008	 485     head TOCOUNTED,">COUNTED",docolon
+097e  003e 0043 004f	 485
+0981  0055 004e 0054	 485
+0984  0045 0044 7c20	 485
+0987  0034          	 485
+0988  0765 026c 04f9	 486         DW TWODUP,CSTORE,CHARPLUS,SWOP,CMOVE,EXIT
+098b  01d9 0450 0016	 486
+098e                	 487 
+098e                	 488 ;C WORD   char -- c-addr n   word delim'd by char
+098e                	 489 ;   DUP  SOURCE >IN @ /STRING   -- c c adr n
+098e                	 490 ;   DUP >R   ROT SKIP           -- c adr' n'
+098e                	 491 ;   OVER >R  ROT SCAN           -- adr" n"
+098e                	 492 ;   DUP IF CHAR- THEN        skip trailing delim.
+098e                	 493 ;   R> R> ROT -   >IN +!        update >IN offset
+098e                	 494 ;   TUCK -                      -- adr' N
+098e                	 495 ;   HERE >counted               --
+098e                	 496 ;   HERE                        -- a
+098e                	 497 ;   BL OVER COUNT + C! ;    append trailing blank
+098e  097d 0000 0004	 498     head WORD,"WORD",docolon
+0991  0057 004f 0052	 498
+0994  0044 7c20 0034	 498
+0997  01b7 0963 05aa	 499         DW DUP,SOURCE,TOIN,FETCH,SLASHSTRING
+099a  0276 0972     	 499
+099c  01b7 0216 01f2	 500         DW DUP,TOR,ROT,SKIP
+099f  0476          	 500
+09a0  01e6 0216 01f2	 501         DW OVER,TOR,ROT,SCAN
+09a3  048e          	 501
+09a4  01b7 039b 09a8	 502         DW DUP,qbranch,WORD1,ONEMINUS  ; char-
+09a7  02e7          	 502
+09a8  0221 0221 01f2	 503 :WORD1  DW RFROM,RFROM,ROT,MINUS,TOIN,PLUSSTORE
+09ab  029b 05aa 032a	 503
+09ae  020b 029b     	 504         DW TUCK,MINUS
+09b0  092d 0986 092d	 505         DW HERE,TOCOUNTED,HERE
+09b3  0583 01e6 0792	 506         DW BL,OVER,COUNT,PLUS,CSTORE,EXIT
+09b6  0287 026c 0016	 506
+09b9                	 507 
+09b9                	 508 ;Z NFA>LFA   nfa -- lfa    name adr -> link field
+09b9                	 509 ;   2 - ;
+09b9  0990 0000 0007	 510     head NFATOLFA,"NFA>LFA",docolon
+09bc  004e 0046 0041	 510
+09bf  003e 004c 0046	 510
+09c2  0041 7c20 0034	 510
+09c5  0021 0002 029b	 511         DW LIT,2,MINUS,EXIT
+09c8  0016          	 511
+09c9                	 512 
+09c9                	 513 ;Z NFA>CFA   nfa -- cfa    name adr -> code field
+09c9                	 514 ;   COUNT 7F AND + ;       mask off 'smudge' bit
+09c9  09bb 0000 0007	 515     head NFATOCFA,"NFA>CFA",docolon
+09cc  004e 0046 0041	 515
+09cf  003e 0043 0046	 515
+09d2  0041 7c20 0034	 515
+09d5  0792 0021 007f	 516         DW COUNT,LIT,0x7F,AND,PLUS,EXIT
+09d8  02a7 0287 0016	 516
+09db                	 517 
+09db                	 518 ;Z IMMED?    nfa -- f      fetch immediate flag
+09db                	 519 ;   1- C@ ;                     nonzero if immed
+09db  09cb 0000 0006	 520     head IMMEDQ,"IMMED?",docolon
+09de  0049 004d 004d	 520
+09e1  0045 0044 003f	 520
+09e4  7c20 0034     	 520
+09e6  02e7 027f 0016	 521         DW ONEMINUS,CFETCH,EXIT
+09e9                	 522 
+09e9                	 523 ;C FIND   c-addr -- c-addr 0   if not found
+09e9                	 524 ;C                  xt  1      if immediate
+09e9                	 525 ;C                  xt -1      if "normal"
+09e9                	 526 ;   LATEST @ BEGIN             -- a nfa
+09e9                	 527 ;       2DUP OVER C@ CHAR+     -- a nfa a nfa n+1
+09e9                	 528 ;       S=                     -- a nfa f
+09e9                	 529 ;       DUP IF
+09e9                	 530 ;           DROP
+09e9                	 531 ;           NFA>LFA @ DUP      -- a link link
+09e9                	 532 ;       THEN
+09e9                	 533 ;   0= UNTIL                   -- a nfa  OR  a 0
+09e9                	 534 ;   DUP IF
+09e9                	 535 ;       NIP DUP NFA>CFA        -- nfa xt
+09e9                	 536 ;       SWAP IMMED?            -- xt iflag
+09e9                	 537 ;       0= 1 OR                -- xt 1/-1
+09e9                	 538 ;   THEN ;
+09e9  09dd 0000 0004	 539     head FIND,"FIND",docolon
+09ec  0046 0049 004e	 539
+09ef  0044 7c20 0034	 539
+09f2  05e0 0276     	 540         DW LATEST,FETCH
+09f4  0765 01e6 027f	 541 :FIND1  DW TWODUP,OVER,CFETCH,CHARPLUS
+09f7  04f9          	 541
+09f8  04a4 01b7 039b	 542         DW SEQUAL,DUP,qbranch,FIND2
+09fb  0a00          	 542
+09fc  01ce 09c3 0276	 543         DW DROP,NFATOLFA,FETCH,DUP
+09ff  01b7          	 543
+0a00  0334 039b 09f4	 544 :FIND2  DW ZEROEQUAL,qbranch,FIND1
+0a03  01b7 039b 0a0f	 545         DW DUP,qbranch,FIND3
+0a06  0200 01b7 09d3	 546         DW NIP,DUP,NFATOCFA
+0a09  01d9 09e4 0334	 547         DW SWOP,IMMEDQ,ZEROEQUAL,LIT,1,OR
+0a0c  0021 0001 02b0	 547
+0a0f  0016          	 548 :FIND3  DW EXIT
+0a10                	 549 
+0a10                	 550 ;C LITERAL  x --        append numeric literal
+0a10                	 551 ;   STATE @ IF ['] LIT ,XT , THEN ; IMMEDIATE
+0a10                	 552 ; This tests STATE so that it can also be used
+0a10                	 553 ; interpretively.  (ANSI doesn't require this.)
+0a10  09eb 0001 0007	 554     immed LITERAL,"LITERAL",docolon
+0a13  004c 0049 0054	 554
+0a16  0045 0052 0041	 554
+0a19  004c 7c20 0034	 554
+0a1c  05bf 0276 039b	 555         DW STATE,FETCH,qbranch,LITER1
+0a1f  0a24          	 555
+0a20  0021 0021 051f	 556         DW LIT,LIT,COMMAXT,COMMA
+0a23  0943          	 556
+0a24  0016          	 557 :LITER1 DW EXIT
+0a25                	 558 
+0a25                	 559 ;Z DIGIT?   c -- n -1   if c is a valid digit
+0a25                	 560 ;Z            -- x  0   otherwise
+0a25                	 561 ;   [ HEX ] DUP 39 > 100 AND +     silly looking
+0a25                	 562 ;   DUP 140 > 107 AND -   30 -     but it works!
+0a25                	 563 ;   DUP BASE @ U< ;
+0a25  0a12 0000 0006	 564     head DIGITQ,"DIGIT?",docolon
+0a28  0044 0049 0047	 564
+0a2b  0049 0054 003f	 564
+0a2e  7c20 0034     	 564
+0a30  01b7 0021 0039	 565         DW DUP,LIT,0x39,GREATER,LIT,0x100,AND,PLUS
+0a33  036b 0021 0100	 565
+0a36  02a7 0287     	 565
+0a38  01b7 0021 0140	 566         DW DUP,LIT,0x140,GREATER,LIT,0x107,AND
+0a3b  036b 0021 0107	 566
+0a3e  02a7          	 566
+0a3f  029b 0021 0030	 567         DW MINUS,LIT,0x30,MINUS
+0a42  029b          	 567
+0a43  01b7 05b4 0276	 568         DW DUP,BASE,FETCH,ULESS,EXIT
+0a46  0375 0016     	 568
+0a48                	 569 
+0a48                	 570 ;Z ?SIGN   adr n -- adr' n' f  get optional sign
+0a48                	 571 ;Z  advance adr/n if sign; return NZ if negative
+0a48                	 572 ;   OVER C@                 -- adr n c
+0a48                	 573 ;   2C - DUP ABS 1 = AND    -- +=-1, -=+1, else 0
+0a48                	 574 ;   DUP IF 1+               -- +=0, -=+2
+0a48                	 575 ;       >R 1 /STRING R>     -- adr' n' f
+0a48                	 576 ;   THEN ;
+0a48  0a27 0000 0005	 577     head QSIGN,"?SIGN",docolon
+0a4b  003f 0053 0049	 577
+0a4e  0047 004e 7c20	 577
+0a51  0034          	 577
+0a52  01e6 027f 0021	 578         DW OVER,CFETCH,LIT,0x2C,MINUS,DUP,ABS
+0a55  002c 029b 01b7	 578
+0a58  0654          	 578
+0a59  0021 0001 034e	 579         DW LIT,1,EQUAL,AND,DUP,qbranch,QSIGN1
+0a5c  02a7 01b7 039b	 579
+0a5f  0a66          	 579
+0a60  02de 0216 0021	 580         DW ONEPLUS,TOR,LIT,1,SLASHSTRING,RFROM
+0a63  0001 0972 0221	 580
+0a66  0016          	 581 :QSIGN1 DW EXIT
+0a67                	 582 
+0a67                	 583 ;C >NUMBER  ud adr u -- ud' adr' u'
+0a67                	 584 ;C                      convert string to number
+0a67                	 585 ;   BEGIN
+0a67                	 586 ;   DUP WHILE
+0a67                	 587 ;       OVER C@ DIGIT?
+0a67                	 588 ;       0= IF DROP EXIT THEN
+0a67                	 589 ;       >R 2SWAP BASE @ UD*
+0a67                	 590 ;       R> M+ 2SWAP
+0a67                	 591 ;       1 /STRING
+0a67                	 592 ;   REPEAT ;
+0a67  0a4a 0000 0007	 593     head TONUMBER,">NUMBER",docolon
+0a6a  003e 004e 0055	 593
+0a6d  004d 0042 0045	 593
+0a70  0052 7c20 0034	 593
+0a73  01b7 039b 0a8b	 594 :TONUM1 DW DUP,qbranch,TONUM3
+0a76  01e6 027f 0a2e	 595         DW OVER,CFETCH,DIGITQ
+0a79  0334 039b 0a7e	 596         DW ZEROEQUAL,qbranch,TONUM2,DROP,EXIT
+0a7c  01ce 0016     	 596
+0a7e  0216 0772 05b4	 597 :TONUM2 DW TOR,TWOSWAP,BASE,FETCH,UDSTAR
+0a81  0276 086f     	 597
+0a83  0221 0290 0772	 598         DW RFROM,MPLUS,TWOSWAP
+0a86  0021 0001 0972	 599         DW LIT,1,SLASHSTRING,branch,TONUM1
+0a89  038d 0a73     	 599
+0a8b  0016          	 600 :TONUM3 DW EXIT
+0a8c                	 601 
+0a8c                	 602 ;Z ?NUMBER  c-addr -- n -1      string->number
+0a8c                	 603 ;Z                 -- c-addr 0  if convert error
+0a8c                	 604 ;   DUP  0 0 ROT COUNT      -- ca ud adr n
+0a8c                	 605 ;   ?SIGN >R  >NUMBER       -- ca ud adr' n'
+0a8c                	 606 ;   IF   R> 2DROP 2DROP 0   -- ca 0   (error)
+0a8c                	 607 ;   ELSE 2DROP NIP R>
+0a8c                	 608 ;       IF NEGATE THEN  -1  -- n -1   (ok)
+0a8c                	 609 ;   THEN ;
+0a8c  0a69 0000 0007	 610     head QNUMBER,"?NUMBER",docolon
+0a8f  003f 004e 0055	 610
+0a92  004d 0042 0045	 610
+0a95  0052 7c20 0034	 610
+0a98  01b7 0021 0000	 611         DW DUP,LIT,0,DUP,ROT,COUNT
+0a9b  01b7 01f2 0792	 611
+0a9e  0a50 0216 0a71	 612         DW QSIGN,TOR,TONUMBER,qbranch,QNUM1
+0aa1  039b 0aaa     	 612
+0aa3  0221 0759 0759	 613         DW RFROM,TWODROP,TWODROP,LIT,0
+0aa6  0021 0000     	 613
+0aa8  038d 0ab2     	 614         DW branch,QNUM3
+0aaa  0759 0200 0221	 615 :QNUM1  DW TWODROP,NIP,RFROM,qbranch,QNUM2,NEGATE
+0aad  039b 0ab0 02d4	 615
+0ab0  0021 ffff     	 616 :QNUM2  DW LIT,-1
+0ab2  0016          	 617 :QNUM3  DW EXIT
+0ab3                	 618 
+0ab3                	 619 ;Z INTERPRET    i*x c-addr u -- j*x
+0ab3                	 620 ;Z                      interpret given buffer
+0ab3                	 621 ; This is a common factor of EVALUATE and QUIT.
+0ab3                	 622 ; ref. dpANS-6, 3.4 The Forth Text Interpreter
+0ab3                	 623 ;   'SOURCE 2!  0 >IN !
+0ab3                	 624 ;   BEGIN
+0ab3                	 625 ;   BL WORD DUP C@ WHILE        -- textadr
+0ab3                	 626 ;       FIND                    -- a 0/1/-1
+0ab3                	 627 ;       ?DUP IF                 -- xt 1/-1
+0ab3                	 628 ;           1+ STATE @ 0= OR    immed or interp?
+0ab3                	 629 ;           IF EXECUTE ELSE ,XT THEN
+0ab3                	 630 ;       ELSE                    -- textadr
+0ab3                	 631 ;           ?NUMBER
+0ab3                	 632 ;           IF POSTPONE LITERAL     converted ok
+0ab3                	 633 ;           ELSE COUNT TYPE 3F EMIT CR ABORT  err
+0ab3                	 634 ;           THEN
+0ab3                	 635 ;       THEN
+0ab3                	 636 ;   REPEAT DROP ;
+0ab3  0a8e 0000 0009	 637     head INTERPRET,"INTERPRET",docolon
+0ab6  0049 004e 0054	 637
+0ab9  0045 0052 0050	 637
+0abc  0052 0045 0054	 637
+0abf  7c20 0034     	 637
+0ac1  05d4 0749 0021	 638         DW TICKSOURCE,TWOSTORE,LIT,0,TOIN,STORE
+0ac4  0000 05aa 0261	 638
+0ac7  0583 0995 01b7	 639 :INTER1 DW BL,WORD,DUP,CFETCH,qbranch,INTER9
+0aca  027f 039b 0aed	 639
+0acd  09f0 01c2 039b	 640         DW FIND,QDUP,qbranch,INTER4
+0ad0  0ade          	 640
+0ad1  02de 05bf 0276	 641         DW ONEPLUS,STATE,FETCH,ZEROEQUAL,OR
+0ad4  0334 02b0     	 641
+0ad6  039b 0adb     	 642         DW qbranch,INTER2
+0ad8  0031 038d 0adc	 643         DW EXECUTE,branch,INTER3
+0adb  051f          	 644 :INTER2 DW COMMAXT
+0adc  038d 0aeb     	 645 :INTER3 DW branch,INTER8
+0ade  0a96 039b 0ae4	 646 :INTER4 DW QNUMBER,qbranch,INTER5
+0ae1  0a1a 038d 0aeb	 647         DW LITERAL,branch,INTER6
+0ae4  0792 0813 0021	 648 :INTER5 DW COUNT,TYPE,LIT,0x3F,EMIT,CR,ABORT
+0ae7  003f 00ff 0134	 648
+0aea  0b3a          	 648
+0aeb                	 649 :INTER6
+0aeb  038d 0ac7     	 650 :INTER8 DW branch,INTER1
+0aed  01ce 0016     	 651 :INTER9 DW DROP,EXIT
+0aef                	 652 
+0aef                	 653 ;C EVALUATE  i*x c-addr u -- j*x  interprt string
+0aef                	 654 ;   'SOURCE 2@ >R >R  >IN @ >R
+0aef                	 655 ;   INTERPRET
+0aef                	 656 ;   R> >IN !  R> R> 'SOURCE 2! ;
+0aef  0ab5 0000 0008	 657     head EVALUATE,"EVALUATE",docolon
+0af2  0045 0056 0041	 657
+0af5  004c 0055 0041	 657
+0af8  0054 0045 7c20	 657
+0afb  0034          	 657
+0afc  05d4 073c 0216	 658         DW TICKSOURCE,TWOFETCH,TOR,TOR
+0aff  0216          	 658
+0b00  05aa 0276 0216	 659         DW TOIN,FETCH,TOR,INTERPRET
+0b03  0abf          	 659
+0b04  0221 05aa 0261	 660         DW RFROM,TOIN,STORE,RFROM,RFROM
+0b07  0221 0221     	 660
+0b09  05d4 0749 0016	 661         DW TICKSOURCE,TWOSTORE,EXIT
+0b0c                	 662 
+0b0c                	 663 ;C QUIT     --    R: i*x --    interpret from kbd
+0b0c                	 664 ;   L0 LP !  R0 RP!   0 STATE !
+0b0c                	 665 ;   BEGIN
+0b0c                	 666 ;       TIB DUP TIBSIZE ACCEPT  SPACE
+0b0c                	 667 ;       INTERPRET
+0b0c                	 668 ;       STATE @ 0= IF CR ." OK" THEN
+0b0c                	 669 ;   AGAIN ;
+0b0c  0af1 0000 0004	 670     head QUIT,"QUIT",docolon
+0b0f  0051 0055 0049	 670
+0b12  0054 7c20 0034	 670
+0b15  0609 05f0 0261	 671         DW L0,LP,STORE
+0b18  0611 0258 0021	 672         DW R0,RPSTORE,LIT,0,STATE,STORE
+0b1b  0000 05bf 0261	 672
+0b1e  0599 01b7 0590	 673 :QUIT1  DW TIB,DUP,TIBSIZE,ACCEPT,SPACE
+0b21  07e3 07a1     	 673
+0b23  0abf          	 674         DW INTERPRET
+0b24  05bf 0276 0334	 675         DW STATE,FETCH,ZEROEQUAL,qbranch,QUIT2
+0b27  039b 0b30     	 675
+0b29  0134 082c     	 676         DW CR,XSQUOTE
+0b2b  0003 006f 006b	 677         DW 3,'ok '
+0b2e  0020          	 677
+0b2f  0813          	 678         DW TYPE
+0b30  038d 0b1e     	 679 :QUIT2  DW branch,QUIT1
+0b32                	 680 
+0b32                	 681 ;C ABORT    i*x --   R: j*x --   clear stk & QUIT
+0b32                	 682 ;   S0 SP!  QUIT ;
+0b32  0b0e 0000 0005	 683     head ABORT,"ABORT",docolon
+0b35  0041 0042 004f	 683
+0b38  0052 0054 7c20	 683
+0b3b  0034          	 683
+0b3c  05f8 0242 0b13	 684         DW S0,SPSTORE,QUIT   ; QUIT never returns
+0b3f                	 685 
+0b3f                	 686 ;Z ?ABORT   f c-addr u --      abort & print msg
+0b3f                	 687 ;   ROT IF TYPE ABORT THEN 2DROP ;
+0b3f  0b34 0000 0006	 688     head QABORT,"?ABORT",docolon
+0b42  003f 0041 0042	 688
+0b45  004f 0052 0054	 688
+0b48  7c20 0034     	 688
+0b4a  01f2 039b 0b4f	 689         DW ROT,qbranch,QABO1,TYPE,ABORT
+0b4d  0813 0b3a     	 689
+0b4f  0759 0016     	 690 :QABO1  DW TWODROP,EXIT
+0b51                	 691 
+0b51                	 692 ;C ABORT"  i*x 0  -- i*x   R: j*x -- j*x  x1=0
+0b51                	 693 ;C         i*x x1 --       R: j*x --      x1<>0
+0b51                	 694 ;   POSTPONE S" POSTPONE ?ABORT ; IMMEDIATE
+0b51  0b41 0001 0006	 695     immed ABORTQUOTE,'ABORT"',docolon
+0b54  0041 0042 004f	 695
+0b57  0052 0054 0022	 695
+0b5a  7c20 0034     	 695
+0b5c  083a          	 696         DW SQUOTE
+0b5d  0021 0b48 051f	 697         DW LIT,QABORT,COMMAXT
+0b60  0016          	 698         DW EXIT
+0b61                	 699 
+0b61                	 700 ;C '    -- xt           find word in dictionary
+0b61                	 701 ;   BL WORD FIND
+0b61                	 702 ;   0= ABORT" ?" ;
+0b61  0b53 0000 0001	 703     head TICK,"'",docolon
+0b64  0027 7c20 0034	 703
+0b67  0583 0995 09f0	 704         DW BL,WORD,FIND,ZEROEQUAL,XSQUOTE
+0b6a  0334 082c     	 704
+0b6c  0001 003f     	 705         DW 1,'?'
+0b6e  0b48 0016     	 706         DW QABORT,EXIT
+0b70                	 707 
+0b70                	 708 ;C CHAR   -- char           parse ASCII character
+0b70                	 709 ;   BL WORD 1+ C@ ;
+0b70  0b63 0000 0004	 710     head CHAR,"CHAR",docolon
+0b73  0043 0048 0041	 710
+0b76  0052 7c20 0034	 710
+0b79  0583 0995 02de	 711         DW BL,WORD,ONEPLUS,CFETCH,EXIT
+0b7c  027f 0016     	 711
+0b7e                	 712 
+0b7e                	 713 ;C [CHAR]   --          compile character literal
+0b7e                	 714 ;   CHAR  ['] LIT ,XT  , ; IMMEDIATE
+0b7e  0b72 0001 0006	 715     immed BRACCHAR,"[CHAR]",docolon
+0b81  005b 0043 0048	 715
+0b84  0041 0052 005d	 715
+0b87  7c20 0034     	 715
+0b89  0b77          	 716         DW CHAR
+0b8a  0021 0021 051f	 717         DW LIT,LIT,COMMAXT
+0b8d  0943 0016     	 718         DW COMMA,EXIT
+0b8f                	 719 
+0b8f                	 720 ;C (    --                     skip input until )
+0b8f                	 721 ;   [ HEX ] 29 WORD DROP ; IMMEDIATE
+0b8f  0b80 0001 0001	 722     immed PAREN,"(",docolon
+0b92  0028 7c20 0034	 722
+0b95  0021 0029 0995	 723         DW LIT,0x29,WORD,DROP,EXIT
+0b98  01ce 0016     	 723
+0b9a                	 724 
+0b9a                	 725 ; COMPILER ======================================
+0b9a                	 726 
+0b9a                	 727 ;C CREATE   --      create an empty definition
+0b9a                	 728 ;   LATEST @ , 0 C,         link & immed field
+0b9a                	 729 ;   HERE LATEST !           new "latest" link
+0b9a                	 730 ;   BL WORD C@ 1+ ALLOT         name field
+0b9a                	 731 ;   docreate ,CF                code field
+0b9a  0b91 0000 0006	 732     head CREATE,"CREATE",docolon
+0b9d  0043 0052 0045	 732
+0ba0  0041 0054 0045	 732
+0ba3  7c20 0034     	 732
+0ba5  05e0 0276 0943	 733         DW LATEST,FETCH,COMMA,LIT,0,CCOMMA
+0ba8  0021 0000 0951	 733
+0bab  092d 05e0 0261	 734         DW HERE,LATEST,STORE
+0bae  0583 0995 027f	 735         DW BL,WORD,CFETCH,ONEPLUS,ALLOT
+0bb1  02de 093a     	 735
+0bb3  0021 004d 0536	 736         DW LIT,docreate,COMMACF,EXIT
+0bb6  0016          	 736
+0bb7                	 737         
+0bb7                	 738 ;Z (DOES>)  --      run-time action of DOES>
+0bb7                	 739 ;   R>              adrs of headless DOES> def'n
+0bb7                	 740 ;   LATEST @ NFA>CFA    code field to fix up
+0bb7                	 741 ;   !CF ;
+0bb7  0b9c 0000 0007	 742     head XDOES,"(DOES>)",docolon
+0bba  0028 0044 004f	 742
+0bbd  0045 0053 003e	 742
+0bc0  0029 7c20 0034	 742
+0bc3  0221 05e0 0276	 743         DW RFROM,LATEST,FETCH,NFATOCFA,STORECF
+0bc6  09d3 0527     	 743
+0bc8  0016          	 744         DW EXIT
+0bc9                	 745 
+0bc9                	 746 ;C DOES>    --      change action of latest def'n
+0bc9                	 747 ;   COMPILE (DOES>)
+0bc9                	 748 ;   dodoes ,CF ; IMMEDIATE
+0bc9  0bb9 0001 0005	 749     immed DOES,"DOES>",docolon
+0bcc  0044 004f 0045	 749
+0bcf  0053 003e 7c20	 749
+0bd2  0034          	 749
+0bd3  0021 0bc1 051f	 750         DW LIT,XDOES,COMMAXT
+0bd6  0021 007c 0536	 751         DW LIT,dodoes,COMMACF,EXIT
+0bd9  0016          	 751
+0bda                	 752 
+0bda                	 753 ;C RECURSE  --      recurse current definition
+0bda                	 754 ;   LATEST @ NFA>CFA ,XT ; IMMEDIATE
+0bda  0bcb 0001 0007	 755     immed RECURSE,"RECURSE",docolon
+0bdd  0052 0045 0043	 755
+0be0  0055 0052 0053	 755
+0be3  0045 7c20 0034	 755
+0be6  05e0 0276 09d3	 756         DW LATEST,FETCH,NFATOCFA,COMMAXT,EXIT
+0be9  051f 0016     	 756
+0beb                	 757 
+0beb                	 758 ;C [        --      enter interpretive state
+0beb                	 759 ;   0 STATE ! ; IMMEDIATE
+0beb  0bdc 0001 0001	 760     immed LEFTBRACKET,"[",docolon
+0bee  005b 7c20 0034	 760
+0bf1  0021 0000 05bf	 761         DW LIT,0,STATE,STORE,EXIT
+0bf4  0261 0016     	 761
+0bf6                	 762 
+0bf6                	 763 ;C ]        --      enter compiling state
+0bf6                	 764 ;   -1 STATE ! ;
+0bf6  0bed 0000 0001	 765     head RIGHTBRACKET,"]",docolon
+0bf9  005d 7c20 0034	 765
+0bfc  0021 ffff 05bf	 766         DW LIT,-1,STATE,STORE,EXIT
+0bff  0261 0016     	 766
+0c01                	 767 
+0c01                	 768 ;Z HIDE     --      "hide" latest definition
+0c01                	 769 ;   LATEST @ DUP C@ 80 OR SWAP C! ;
+0c01  0bf8 0000 0004	 770     head HIDE,"HIDE",docolon
+0c04  0048 0049 0044	 770
+0c07  0045 7c20 0034	 770
+0c0a  05e0 0276 01b7	 771         DW LATEST,FETCH,DUP,CFETCH,LIT,0x80,OR
+0c0d  027f 0021 0080	 771
+0c10  02b0          	 771
+0c11  01d9 026c 0016	 772         DW SWOP,CSTORE,EXIT
+0c14                	 773 
+0c14                	 774 ;Z REVEAL   --      "reveal" latest definition
+0c14                	 775 ;   LATEST @ DUP C@ 7F AND SWAP C! ;
+0c14  0c03 0000 0006	 776     head REVEAL,"REVEAL",docolon
+0c17  0052 0045 0056	 776
+0c1a  0045 0041 004c	 776
+0c1d  7c20 0034     	 776
+0c1f  05e0 0276 01b7	 777         DW LATEST,FETCH,DUP,CFETCH,LIT,0x7F,AND
+0c22  027f 0021 007f	 777
+0c25  02a7          	 777
+0c26  01d9 026c 0016	 778         DW SWOP,CSTORE,EXIT
+0c29                	 779 
+0c29                	 780 ;C IMMEDIATE   --   make last def'n immediate
+0c29                	 781 ;   1 LATEST @ 1- C! ;   set immediate flag
+0c29  0c16 0000 0009	 782     head IMMEDIATE,"IMMEDIATE",docolon
+0c2c  0049 004d 004d	 782
+0c2f  0045 0044 0049	 782
+0c32  0041 0054 0045	 782
+0c35  7c20 0034     	 782
+0c37  0021 0001 05e0	 783         DW LIT,1,LATEST,FETCH,ONEMINUS,CSTORE
+0c3a  0276 02e7 026c	 783
+0c3d  0016          	 784         DW EXIT
+0c3e                	 785 
+0c3e                	 786 ;C :        --      begin a colon definition
+0c3e                	 787 ;   CREATE HIDE ] !COLON ;
+0c3e  0c2b 0000 0001	 788     head COLON,":",docolon
+0c41  003a 7c20 0034	 788
+0c44  0ba3 0c08 0bfa	 789         DW CREATE,HIDE,RIGHTBRACKET,STORCOLON
+0c47  0547          	 789
+0c48  0016          	 790         DW EXIT
+0c49                	 791 
+0c49                	 792 ;C ;
+0c49                	 793 ;   REVEAL  ,EXIT
+0c49                	 794 ;   POSTPONE [  ; IMMEDIATE
+0c49  0c40 0001 0001	 795     immed SEMICOLON,';',docolon
+0c4c  003b 7c20 0034	 795
+0c4f  0c1d 0558     	 796         DW REVEAL,CEXIT
+0c51  0bef 0016     	 797         DW LEFTBRACKET,EXIT
+0c53                	 798 
+0c53                	 799 ;C [']  --         find word & compile as literal
+0c53                	 800 ;   '  ['] LIT ,XT  , ; IMMEDIATE
+0c53                	 801 ; When encountered in a colon definition, the
+0c53                	 802 ; phrase  ['] xxx  will cause   LIT,xxt  to be
+0c53                	 803 ; compiled into the colon definition (where
+0c53                	 804 ; (where xxt is the execution token of word xxx).
+0c53                	 805 ; When the colon definition executes, xxt will
+0c53                	 806 ; be put on the stack.  (All xt's are one cell.)
+0c53  0c4b 0001 0003	 807     immed BRACTICK,"[']",docolon
+0c56  005b 0027 005d	 807
+0c59  7c20 0034     	 807
+0c5b  0b65          	 808         DW TICK               ; get xt of 'xxx'
+0c5c  0021 0021 051f	 809         DW LIT,LIT,COMMAXT    ; append LIT action
+0c5f  0943 0016     	 810         DW COMMA,EXIT         ; append xt literal
+0c61                	 811 
+0c61                	 812 ;C POSTPONE  --   postpone compile action of word
+0c61                	 813 ;   BL WORD FIND
+0c61                	 814 ;   DUP 0= ABORT" ?"
+0c61                	 815 ;   0< IF   -- xt  non immed: add code to current
+0c61                	 816 ;                  def'n to compile xt later.
+0c61                	 817 ;       ['] LIT ,XT  ,      add "LIT,xt,COMMAXT"
+0c61                	 818 ;       ['] ,XT ,XT         to current definition
+0c61                	 819 ;   ELSE  ,XT      immed: compile into cur. def'n
+0c61                	 820 ;   THEN ; IMMEDIATE
+0c61  0c55 0001 0008	 821     immed POSTPONE,"POSTPONE",docolon
+0c64  0050 004f 0053	 821
+0c67  0054 0050 004f	 821
+0c6a  004e 0045 7c20	 821
+0c6d  0034          	 821
+0c6e  0583 0995 09f0	 822         DW BL,WORD,FIND,DUP,ZEROEQUAL,XSQUOTE
+0c71  01b7 0334 082c	 822
+0c74  0001 003f     	 823         DW 1,'?'
+0c76  0b48 033f 039b	 824         DW QABORT,ZEROLESS,qbranch,POST1
+0c79  0c83          	 824
+0c7a  0021 0021 051f	 825         DW LIT,LIT,COMMAXT,COMMA
+0c7d  0943          	 825
+0c7e  0021 051f 051f	 826         DW LIT,COMMAXT,COMMAXT,branch,POST2
+0c81  038d 0c84     	 826
+0c83  051f          	 827 :POST1  DW COMMAXT
+0c84  0016          	 828 :POST2  DW EXIT
+0c85                	 829                
+0c85                	 830 ;Z COMPILE   --   append inline execution token
+0c85                	 831 ;   R> DUP CELL+ >R @ ,XT ;
+0c85                	 832 ; The phrase ['] xxx ,XT appears so often that
+0c85                	 833 ; this word was created to combine the actions
+0c85                	 834 ; of LIT and ,XT.  It takes an inline literal
+0c85                	 835 ; execution token and appends it to the dict.
+0c85                	 836 ;    head COMPILE,7,COMPILE,docolon
+0c85                	 837 ;        DW RFROM,DUP,CELLPLUS,TOR
+0c85                	 838 ;        DW FETCH,COMMAXT,EXIT
+0c85                	 839 ; N.B.: not used in the current implementation
+0c85                	 840 
+0c85                	 841 ; CONTROL STRUCTURES ============================
+0c85                	 842 
+0c85                	 843 ;C IF       -- adrs    conditional forward branch
+0c85                	 844 ;   ['] qbranch ,BRANCH  HERE DUP ,DEST ;
+0c85                	 845 ;   IMMEDIATE
+0c85  0c63 0001 0002	 846     immed IF,"IF",docolon
+0c88  0049 0046 7c20	 846
+0c8b  0034          	 846
+0c8c  0021 039b 0568	 847         DW LIT,qbranch,COMMABRANCH
+0c8f  092d 01b7 0572	 848         DW HERE,DUP,COMMADEST,EXIT
+0c92  0016          	 848
+0c93                	 849 
+0c93                	 850 ;C THEN     adrs --        resolve forward branch
+0c93                	 851 ;   HERE SWAP !DEST ; IMMEDIATE
+0c93  0c87 0001 0004	 852     immed THEN,"THEN",docolon
+0c96  0054 0048 0045	 852
+0c99  004e 7c20 0034	 852
+0c9c  092d 01d9 057c	 853         DW HERE,SWOP,STOREDEST,EXIT
+0c9f  0016          	 853
+0ca0                	 854 
+0ca0                	 855 ;C ELSE     adrs1 -- adrs2    branch for IF..ELSE
+0ca0                	 856 ;   ['] branch ,BRANCH  HERE DUP ,DEST
+0ca0                	 857 ;   SWAP  POSTPONE THEN ; IMMEDIATE
+0ca0  0c95 0001 0004	 858     immed ELSE,"ELSE",docolon
+0ca3  0045 004c 0053	 858
+0ca6  0045 7c20 0034	 858
+0ca9  0021 038d 0568	 859         DW LIT,branch,COMMABRANCH
+0cac  092d 01b7 0572	 860         DW HERE,DUP,COMMADEST
+0caf  01d9 0c9a 0016	 861         DW SWOP,THEN,EXIT
+0cb2                	 862 
+0cb2                	 863 ;C BEGIN    -- adrs        target for bwd. branch
+0cb2                	 864 ;   HERE ; IMMEDIATE
+0cb2  0ca2 0001 0005	 865     immed BEGIN,"BEGIN",docode
+0cb5  0042 0045 0047	 865
+0cb8  0049 004e     	 865
+0cba  7f81 092d     	 866         set pc,HERE
+0cbc                	 867 
+0cbc                	 868 ;C UNTIL    adrs --   conditional backward branch
+0cbc                	 869 ;   ['] qbranch ,BRANCH  ,DEST ; IMMEDIATE
+0cbc                	 870 ;   conditional backward branch
+0cbc  0cb4 0001 0005	 871     immed UNTIL,"UNTIL",docolon
+0cbf  0055 004e 0054	 871
+0cc2  0049 004c 7c20	 871
+0cc5  0034          	 871
+0cc6  0021 039b 0568	 872         DW LIT,qbranch,COMMABRANCH
+0cc9  0572 0016     	 873         DW COMMADEST,EXIT
+0ccb                	 874 
+0ccb                	 875 ;X AGAIN    adrs --      uncond'l backward branch
+0ccb                	 876 ;   ['] branch ,BRANCH  ,DEST ; IMMEDIATE
+0ccb                	 877 ;   unconditional backward branch
+0ccb  0cbe 0001 0005	 878     immed AGAIN,"AGAIN",docolon
+0cce  0041 0047 0041	 878
+0cd1  0049 004e 7c20	 878
+0cd4  0034          	 878
+0cd5  0021 038d 0568	 879         DW LIT,branch,COMMABRANCH
+0cd8  0572 0016     	 880         DW COMMADEST,EXIT
+0cda                	 881 
+0cda                	 882 ;C WHILE    -- adrs         branch for WHILE loop
+0cda                	 883 ;   POSTPONE IF ; IMMEDIATE
+0cda  0ccd 0001 0005	 884     immed WHILE,"WHILE",docode
+0cdd  0057 0048 0049	 884
+0ce0  004c 0045     	 884
+0ce2  7f81 0c8a     	 885         set pc,IF
+0ce4                	 886 
+0ce4                	 887 ;C REPEAT   adrs1 adrs2 --     resolve WHILE loop
+0ce4                	 888 ;   SWAP POSTPONE AGAIN POSTPONE THEN ; IMMEDIATE
+0ce4  0cdc 0001 0006	 889     immed REPEAT,"REPEAT",docolon
+0ce7  0052 0045 0050	 889
+0cea  0045 0041 0054	 889
+0ced  7c20 0034     	 889
+0cef  01d9 0cd3 0c9a	 890         DW SWOP,AGAIN,THEN,EXIT
+0cf2  0016          	 890
+0cf3                	 891 
+0cf3                	 892 ;Z >L   x --   L: -- x        move to leave stack
+0cf3                	 893 ;   CELL LP +!  LP @ ! ;      (L stack grows up)
+0cf3  0ce6 0000 0002	 894     head TOL,">L",docolon
+0cf6  003e 004c 7c20	 894
+0cf9  0034          	 894
+0cfa  04d7 05f0 032a	 895         DW CELL,LP,PLUSSTORE,LP,FETCH,STORE,EXIT
+0cfd  05f0 0276 0261	 895
+0d00  0016          	 895
+0d01                	 896 
+0d01                	 897 ;Z L>   -- x   L: x --      move from leave stack
+0d01                	 898 ;   LP @ @  CELL NEGATE LP +! ;
+0d01  0cf5 0000 0002	 899     head LFROM,"L>",docolon
+0d04  004c 003e 7c20	 899
+0d07  0034          	 899
+0d08  05f0 0276 0276	 900         DW LP,FETCH,FETCH
+0d0b  04d7 02d4 05f0	 901         DW CELL,NEGATE,LP,PLUSSTORE,EXIT
+0d0e  032a 0016     	 901
+0d10                	 902 
+0d10                	 903 ;C DO       -- adrs   L: -- 0
+0d10                	 904 ;   ['] xdo ,XT   HERE     target for bwd branch
+0d10                	 905 ;   0 >L ; IMMEDIATE           marker for LEAVEs
+0d10  0d03 0001 0002	 906     immed DO,"DO",docolon
+0d13  0044 004f 7c20	 906
+0d16  0034          	 906
+0d17  0021 03ab 051f	 907         DW LIT,xdo,COMMAXT,HERE
+0d1a  092d          	 907
+0d1b  0021 0000 0cf8	 908         DW LIT,0,TOL,EXIT
+0d1e  0016          	 908
+0d1f                	 909 
+0d1f                	 910 ;Z ENDLOOP   adrs xt --   L: 0 a1 a2 .. aN --
+0d1f                	 911 ;   ,BRANCH  ,DEST                backward loop
+0d1f                	 912 ;   BEGIN L> ?DUP WHILE POSTPONE THEN REPEAT ;
+0d1f                	 913 ;                                 resolve LEAVEs
+0d1f                	 914 ; This is a common factor of LOOP and +LOOP.
+0d1f  0d12 0000 0007	 915     head ENDLOOP,"ENDLOOP",docolon
+0d22  0045 004e 0044	 915
+0d25  004c 004f 004f	 915
+0d28  0050 7c20 0034	 915
+0d2b  0568 0572     	 916         DW COMMABRANCH,COMMADEST
+0d2d  0d06 01c2 039b	 917 :LOOP1  DW LFROM,QDUP,qbranch,LOOP2
+0d30  0d34          	 917
+0d31  0c9a 038d 0d2d	 918         DW THEN,branch,LOOP1
+0d34  0016          	 919 :LOOP2  DW EXIT
+0d35                	 920 
+0d35                	 921 ;C LOOP    adrs --   L: 0 a1 a2 .. aN --
+0d35                	 922 ;   ['] xloop ENDLOOP ;  IMMEDIATE
+0d35  0d21 0001 0004	 923     immed LOOP,"LOOP",docolon
+0d38  004c 004f 004f	 923
+0d3b  0050 7c20 0034	 923
+0d3e  0021 03c0 0d29	 924         DW LIT,xloop,ENDLOOP,EXIT
+0d41  0016          	 924
+0d42                	 925 
+0d42                	 926 ;C +LOOP   adrs --   L: 0 a1 a2 .. aN --
+0d42                	 927 ;   ['] xplusloop ENDLOOP ;  IMMEDIATE
+0d42  0d37 0001 0005	 928     immed PLUSLOOP,"+LOOP",docolon
+0d45  002b 004c 004f	 928
+0d48  004f 0050 7c20	 928
+0d4b  0034          	 928
+0d4c  0021 03d8 0d29	 929         DW LIT,xplusloop,ENDLOOP,EXIT
+0d4f  0016          	 929
+0d50                	 930 
+0d50                	 931 ;C LEAVE    --    L: -- adrs
+0d50                	 932 ;   ['] UNLOOP ,XT
+0d50                	 933 ;   ['] branch ,BRANCH   HERE DUP ,DEST  >L
+0d50                	 934 ;   ; IMMEDIATE      unconditional forward branch
+0d50  0d44 0001 0005	 935     immed LEAVE,"LEAVE",docolon
+0d53  004c 0045 0041	 935
+0d56  0056 0045 7c20	 935
+0d59  0034          	 935
+0d5a  0021 03fc 051f	 936         DW LIT,unloop,COMMAXT
+0d5d  0021 038d 0568	 937         DW LIT,branch,COMMABRANCH
+0d60  092d 01b7 0572	 938         DW HERE,DUP,COMMADEST,TOL,EXIT
+0d63  0cf8 0016     	 938
+0d65                	 939 
+0d65                	 940 ; OTHER OPERATIONS ==============================
+0d65                	 941 
+0d65                	 942 ;X WITHIN   n1|u1 n2|u2 n3|u3 -- f   n2<=n1<n3?
+0d65                	 943 ;  OVER - >R - R> U< ;          per ANS document
+0d65  0d52 0000 0006	 944     head WITHIN,"WITHIN",docolon
+0d68  0057 0049 0054	 944
+0d6b  0048 0049 004e	 944
+0d6e  7c20 0034     	 944
+0d70  01e6 029b 0216	 945         DW OVER,MINUS,TOR,MINUS,RFROM,ULESS,EXIT
+0d73  029b 0221 0375	 945
+0d76  0016          	 945
+0d77                	 946 
+0d77                	 947 ;C MOVE    addr1 addr2 u --     smart move
+0d77                	 948 ;             VERSION FOR 1 ADDRESS UNIT = 1 CHAR
+0d77                	 949 ;  >R 2DUP SWAP DUP R@ +     -- ... dst src src+n
+0d77                	 950 ;  WITHIN IF  R> CMOVE>        src <= dst < src+n
+0d77                	 951 ;       ELSE  R> CMOVE  THEN ;          otherwise
+0d77  0d67 0000 0004	 952     head MOVE,"MOVE",docolon
+0d7a  004d 004f 0056	 952
+0d7d  0045 7c20 0034	 952
+0d80  0216 0765 01d9	 953         DW TOR,TWODUP,SWOP,DUP,RFETCH,PLUS
+0d83  01b7 022c 0287	 953
+0d86  0d6e 039b 0d8d	 954         DW WITHIN,qbranch,MOVE1
+0d89  0221 0462 038d	 955         DW RFROM,CMOVEUP,branch,MOVE2
+0d8c  0d8f          	 955
+0d8d  0221 0450     	 956 :MOVE1  DW RFROM,CMOVE
+0d8f  0016          	 957 :MOVE2  DW EXIT
+0d90                	 958 
+0d90                	 959 ;C DEPTH    -- +n        number of items on stack
+0d90                	 960 ;   SP@ S0 SWAP - ;
+0d90  0d79 0000 0005	 961     head DEPTH,"DEPTH",docolon
+0d93  0044 0045 0050	 961
+0d96  0054 0048 7c20	 961
+0d99  0034          	 961
+0d9a  0237 05f8 01d9	 962         DW SPFETCH,S0,SWOP,MINUS,EXIT
+0d9d  029b 0016     	 962
+0d9f                	 963 
+0d9f                	 964 ;C ENVIRONMENT?  c-addr u -- false   system query
+0d9f                	 965 ;                         -- i*x true
+0d9f                	 966 ;   2DROP 0 ;       the minimal definition!
+0d9f  0d92 0000 000c	 967     head ENVIRONMENTQ,"ENVIRONMENT?",docolon
+0da2  0045 004e 0056	 967
+0da5  0049 0052 004f	 967
+0da8  004e 004d 0045	 967
+0dab  004e 0054 003f	 967
+0dae  7c20 0034     	 967
+0db0  0759 0021 0000	 968         DW TWODROP,LIT,0,EXIT
+0db3  0016          	 968
+0db4                	 969 
+0db4                	 970 ; UTILITY WORDS AND STARTUP =====================
+0db4                	 971 
+0db4                	 972 ;X WORDS    --          list all words in dict.
+0db4                	 973 ;   LATEST @ BEGIN
+0db4                	 974 ;       DUP COUNT TYPE SPACE
+0db4                	 975 ;       NFA>LFA @
+0db4                	 976 ;   DUP 0= KEY? OR UNTIL
+0db4                	 977 ;   DROP ;
+0db4  0da1 0000 0005	 978     head WORDS,"WORDS",docolon
+0db7  0057 004f 0052	 978
+0dba  0044 0053 7c20	 978
+0dbd  0034          	 978
+0dbe  05e0 0276     	 979         DW LATEST,FETCH
+0dc0  01b7 0792 0813	 980 :WDS1   DW DUP,COUNT,TYPE,SPACE,NFATOLFA,FETCH
+0dc3  07a1 09c3 0276	 980
+0dc6  01b7 0334 0183	 981         DW DUP,ZEROEQUAL,querykey,or,qbranch,WDS1
+0dc9  02b0 039b 0dc0	 981
+0dcc  01ce 0016     	 982         DW DROP,EXIT
+0dce                	 983 
+0dce                	 984 ;X .S      --           print stack contents
+0dce                	 985 ;   SP@ S0 - IF
+0dce                	 986 ;       SP@ S0 1- DO I @ U. LOOP
+0dce                	 987 ;   THEN ;
+0dce  0db6 0000 0002	 988     head DOTS,".S",docolon
+0dd1  002e 0053 7c20	 988
+0dd4  0034          	 988
+0dd5  0237 05f8 029b	 989         DW SPFETCH,S0,MINUS,qbranch,DOTS2
+0dd8  039b 0de3     	 989
+0dda  0237 05f8 02e7	 990         DW SPFETCH,S0,ONEMINUS,XDO
+0ddd  03ab          	 990
+0dde  03e0 0276 08ec	 991 :DOTS1  DW II,FETCH,UDOT,XLOOP,DOTS1
+0de1  03c0 0dde     	 991
+0de3  0016          	 992 :DOTS2  DW EXIT
+0de4                	 993 
+0de4                	 994 ;Z COLD     --      cold start Forth system
+0de4                	 995 ;   UINIT U0 #INIT CMOVE      init user area
+0de4                	 996 ;   80 COUNT INTERPRET       interpret CP/M cmd
+0de4                	 997 ;   ." Z80 CamelForth etc."
+0de4                	 998 ;   ABORT ;
+0de4  0dd0 0000 0004	 999     head COLD,"COLD",docolon
+0de7  0043 004f 004c	 999
+0dea  0044 7c20 0034	 999
+0ded  061c 05a1 062f	1000         DW UINIT,U0,NINIT,CMOVE
+0df0  0450          	1000
+0df1  0160 082c     	1001         DW CLS,XSQUOTE
+0df3  0017 0044 0043	1002         DW 23,'DCPU-16 CamelForth v1.0'
+0df6  0050 0055 002d	1002
+0df9  0031 0036 0020	1002
+0dfc  0043 0061 006d	1002
+0dff  0065 006c 0046	1002
+0e02  006f 0072 0074	1002
+0e05  0068 0020 0076	1002
+0e08  0031 002e 0030	1002
+0e0b  0813 0134 0b3a	1003         DW TYPE,CR,ABORT    ; ABORT never returns
+0e0e                	1004 
+0e0e                	 837 
+0e0e                	 838 :enddict                ; user's code starts here
+0e0e                	 839 
+0de6                	 840         ORG $link
+0de6                	 841 :lastword               ; nfa of last word in dict.
+0e0e                	 842         ORG enddict

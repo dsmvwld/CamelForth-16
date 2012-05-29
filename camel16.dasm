@@ -1,0 +1,842 @@
+; Listing 2.
+; ===============================================
+; CamelForth for the Mojang DCPU-16 (http://0x10c.com)
+; Copyright (c) 2012 Helge Horch
+; CamelForth for the Zilog Z80
+; Copyright (c) 1994,1995 Bradford J. Rodriguez
+;
+; This program is free software; you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation; either version 3 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+; Commercial inquiries should be directed to the author at 
+; 115 First St., #105, Collingwood, Ontario L9Y 4W3 Canada
+; or via email to bj@camelforth.com
+;
+; ===============================================
+; CAMEL16.S: Code Primitives
+;   Source code is for the ASM assembler.
+;   Forth words are documented as follows:
+;x   NAME     stack -- stack    description
+;   where x=C for ANS Forth Core words, X for ANS
+;   Extensions, Z for internal or private words.
+;
+; Direct-Threaded Forth model for DCPU-16
+; 16 bit cell, 16 bit char, 16 bit (word) adrs unit
+;    DCPU-16 B = Forth TOS (top Param Stack item)
+;            C =       W    working register
+;            Z =       IP   Interpreter Pointer
+;           SP =       PSP  Param Stack Pointer
+;            X =       RSP  Return Stack Pointer
+;            Y =       UP   User area Pointer
+;      A, I, J =       temporaries
+;
+; Revision history:
+;   07 Apr 12 v0.1  cloned from Z80 CamelForth
+; ===============================================
+; Macros to define Forth headers
+; HEAD  label,name,action
+; IMMED label,name,action
+;    label  = assembler name for this word
+;             (special characters not allowed)
+;    name   = Forth's name for this word
+;    action = code routine for this word, e.g.
+;             DOCOLON, or DOCODE for code words
+; IMMED defines a header for an IMMEDIATE word.
+;
+;head    MACRO   #label,#name,#action
+;        DAT link
+;        DAT 0
+;link    DEFL $
+;        DAT #length(#name),#name
+;#label:
+;        IF  .NOT.(#action=DOCODE)
+;        jsr #action
+;        ENDIF
+;        ENDM
+;
+;immed   MACRO   #label,#name,#action
+;        DAT link
+;        DAT 1
+;link    DEFL $
+;        DB #length(#name),#name
+;#label:
+;        IF  .NOT.(#action=DOCODE)
+;        jsr #action
+;        ENDIF
+;        ENDM
+;
+; The NEXT macro (3 words) assembles the 'next'
+; code in-line in every Z80 CamelForth CODE word.
+;next    MACRO
+;        set a,[z]   ;
+;     	 add z,1     ;
+;        set pc,a    ;
+;        ENDM
+;
+; ENTRY POINT ===================================
+; all registers zeroed, 64K words available
+:reset  ias 0         ; interrupts off
+        jsr hwdetect  ; detect screen and keyboard
+        jsr hwinit
+        set y,0xfc00  ; UP
+        set x,0xff00  ; RP
+        set pc,cold   ; enter top-level Forth word
+        set sp,0
+        set b,0
+        set pc,reset  ; loop if COLD returns
+
+; Memory map:
+; 0x0000..        Forth kernel and user dictionary
+; 0xfc00..0xfc7f  User area, 128 words
+; 0xfc80..0xfcff  Terminal Input Buffer, 128 words
+; 0xfd00..0xfdff  HOLD area, PAD buffer, L stack, 256 words (40+88+128)
+; 0xfe00..0xfeff  Return stack, 256 words
+; 0xff00..0xffff  Parameter stack, 256 words
+;
+; See also the definitions of U0, S0, and R0
+; in the "system variables & constants" area.
+; A task (user area) requires 0x400 words.
+
+; INTERPRETER LOGIC =============================
+; See also "defining words" at end of this file
+
+;C EXIT     --      exit a colon definition
+    head EXIT,"EXIT",docode
+        set z,[x]     ; pop old IP from ret stk
+        add x,1
+:anext  next
+
+;Z lit      -- x    fetch inline literal to stack
+; This is the primitive compiled by LITERAL.
+    head lit,"lit",docode
+        set push,b     ; push old TOS
+        set b,[z]      ; fetch cell at IP to TOS,
+        add z,1        ;        advancing IP
+        next
+
+;C EXECUTE   i*x xt -- j*x   execute Forth word
+;C                           at 'xt'
+    head EXECUTE,"EXECUTE",docode
+        set a,b		; address of word
+        set b,pop	; get new TOS
+        set pc,a	; go do Forth word
+
+; DEFINING WORDS ================================
+
+; ENTER, a.k.a. DOCOLON, entered by CALL ENTER
+; to enter a new high-level thread (colon def'n.)
+; (internal code fragment, not a Forth word)
+; N.B.: DOCOLON must be defined before any
+; appearance of 'docolon' in a 'word' macro!
+:docolon               ; (alternate name)
+:enter  sub x,1        ; push old IP on ret stack
+        set [x],z
+        set z,pop      ; param field adrs -> IP
+        next
+
+;C VARIABLE   --      define a Forth variable
+;   CREATE 1 CELLS ALLOT ;
+; Action of RAM variable is identical to CREATE,
+; so we don't need a DOES> clause to change it.
+    head VARIABLE,"VARIABLE",docolon
+        DW CREATE,LIT,1,CELLS,ALLOT,EXIT
+; DOVAR, code action of VARIABLE, entered by CALL
+; DOCREATE, code action of newly created words
+:docreate
+:dovar  ; -- a-addr
+        set a,pop  ; parameter field address
+        set push,b ; push old TOS
+        set b,a    ; pfa = variable's adrs -> TOS
+        next
+
+;C CONSTANT   n --      define a Forth constant
+;   CREATE , DOES> (machine code fragment)
+    head CONSTANT,"CONSTANT",docolon
+        DW CREATE,COMMA,XDOES
+; DOCON, code action of CONSTANT,
+; entered by CALL DOCON
+:docon  ; -- x
+        set a,pop  ; parameter field address
+        set push,b ; push old TOS
+        set b,[a]  ; fetch contents of parameter field -> TOS
+        next
+
+;Z USER     n --        define user variable 'n'
+;   CREATE , DOES> (machine code fragment)
+    head USER,"USER",docolon
+        DW CREATE,COMMA,XDOES
+; DOUSER, code action of USER,
+; entered by CALL DOUSER
+:douser  ; -- a-addr
+        set a,pop  ; parameter field address
+        set push,b ; push old TOS
+        set b,[a]  ; fetch contents of parameter field (the offset)
+        add b,y    ; add user base address
+        next
+
+; DODOES, code action of DOES> clause
+; entered by       CALL fragment
+;                  parameter field
+;                       ...
+;        fragment: CALL DODOES
+;                  high-level thread
+; Enters high-level thread with address of
+; parameter field on top of stack.
+; (internal code fragment, not a Forth word)
+:dodoes ; -- a-addr
+        sub x,1        ; push old IP on ret stk
+        set [x],z
+        set z,pop      ; adrs of new thread -> IP
+        set a,pop      ; adrs of parameter field
+        set push,b     ; push old TOS onto stack
+        set b,a        ; pfa -> new TOS
+        next
+
+; TERMINAL I/O =============================
+
+:hwmon  dat 0           ; monitor device number
+:hwkbd  dat 0           ; keyboard device number
+
+:hwdetect
+        hwn j           ; query #devices
+        set i,0
+:hwloop ife i,j         ; so scan 0..n-1
+          set pc,pop    ; return if done
+        hwq i
+        ife b,0x7349    ; LEM1802?
+          set [hwmon],i
+        ife b,0x30cf    ; keyboard?
+          set [hwkbd],i
+        add i,1
+        set pc,hwloop
+
+:hwinit set b,[vrama]
+        set a,0         ; MEM_MAP_SCREEN
+        hwi [hwmon]
+        ; set b,0
+        ; set a,1         ; MEM_MAP_FONT: built-in
+        ; hwi [hwmon]
+        ; set a,2         ; MEM_MAP_PALETTE: built-in
+        ; hwi [hwmon]
+        set a,3         ; SET_BORDER_COLOR
+        set b,[colora]
+        shr b,8
+        hwi [hwmon]
+        set b,0         ; turn off kbd interrupts
+        set a,3
+        hwi [hwkbd]
+        set a,0         ; clear keyboard buffer
+        hwi [hwkbd]
+        set pc,pop
+
+;Z VRAM  -- addr  video RAM start
+    head vram,"VRAM",docon
+:vrama  DW 0x8000
+
+;Z VLEN  -- u   video RAM extent (words)
+    head vlen,"VLEN",docon
+:vlena  DW 384
+
+;Z VCOLS -- u   video line length
+    head vcols,"VCOLS",docon
+        DW 32
+
+;Z CURSOR  -- addr  cursor offset on screen (next char)
+    head cursor,"CURSOR",dovar
+:cursora DW 0
+
+;Z COLOR  -- addr  color mask applied to chars
+    head color,"COLOR",dovar
+:colora DW 0xa200           ; green on green
+
+;Z UNBLINK   -- u   store non-blinking blank at cursor
+    head UNBLINK,"UNBLINK",docolon
+        DW cursor, fetch, vram, over, plus ; ( ofs a)
+        DW color, fetch, bl, plus, swop, store ; ( ofs)
+        DW exit
+
+;C EMIT     c --    output character to console
+    head EMIT,"EMIT",docolon
+        DW lit, 8, over, equal, qbranch, notbs
+        DW drop, unblink, oneminus
+        DW lit, 0, max, cursor, store
+        DW branch, blink
+:notbs  DW color, fetch, plus ; ( c)
+        DW cursor, fetch, vram, plus, store ; ( )
+        DW cursor, fetch, dup, vlen, oneminus, uless ; ( ofs f)
+        DW qbranch, cr1
+        DW oneplus, cursor, store ; ( )
+:blink  DW color, fetch, lit, 0x9f, plus
+        DW cursor, fetch, vram, plus, store, exit
+
+;C CR      --               output newline
+    head CR,"CR",docolon
+        DW unblink ; ( ofs)
+:cr1    DW vcols, oneminus, invert, and ; CR
+        DW dup, cursor, store ; ( ofs)
+        DW vlen, vcols, minus, equal  ; on last line?
+        DW qbranch, noscroll
+        DW vram, vcols, over, plus, swop ; ( a a2)
+        DW vlen, vcols, minus, cmove  ; scroll
+        DW vram, vlen, plus, vcols, minus ; ( a3)
+        DW vcols, branch, cls1        ; clear last line
+:noscroll DW vcols, cursor, plusstore
+        DW branch, blink
+
+;Z CLS    --    clear screen
+    head CLS,"CLS",docolon
+        DW lit, 0, cursor, store
+        DW vram, vlen ; ( a u)
+:cls1   DW color, fetch, bl, plus, fill
+        DW branch, blink
+
+;Z SAVEKEY  -- addr  temporary storage for KEY?
+    head savekey,"SAVEKEY",dovar
+:savekeya DW 0
+
+;X KEY?     -- f    return true if char waiting
+    head querykey,"KEY?",docode
+        set a,1
+        hwi [hwkbd]         ; sets c register
+        ife c,0x11          ; Return key?
+          set c,0x0d
+        ife c,0x10          ; Backspace key?
+          set c,0x08
+        set [savekeya],c
+        set push,b
+        set b,c
+        next
+
+;C KEY      -- c    get character from keyboard
+;   BEGIN SAVEKEY C@ 0= WHILE KEY? DROP REPEAT
+;   SAVEKEY C@  0 SAVEKEY C! ;
+    head KEY,"KEY",docolon
+:KEY1   DW SAVEKEY,CFETCH,ZEROEQUAL,qbranch,KEY2
+        DW QUERYKEY,DROP,branch,KEY1
+:KEY2   DW SAVEKEY,CFETCH,LIT,0,SAVEKEY,CSTORE
+        DW EXIT
+
+
+;X BYE     i*x --    return to CP/M
+    head bye,"bye",docode
+:halt	set pc,halt
+
+; STACK OPERATIONS ==============================
+
+;C DUP      x -- x x      duplicate top of stack
+    head DUP,"DUP",docode
+:pushtos set push,b
+        next
+
+;C ?DUP     x -- 0 | x x    DUP if nonzero
+    head QDUP,"?DUP",docode
+        ifn b,0
+          set push,b
+        next
+
+;C DROP     x --          drop top of stack
+    head DROP,"DROP",docode
+:poptos set b,pop
+        next
+
+;C SWAP     x1 x2 -- x2 x1    swap top two items
+    head SWOP,"SWAP",docode
+        set a,b
+        set b,peek
+        set peek,a
+        next
+
+;C OVER    x1 x2 -- x1 x2 x1   per stack diagram
+    head OVER,"OVER",docode
+        set a,peek
+        set push,b
+        set b,a
+        next
+
+;C ROT    x1 x2 x3 -- x2 x3 x1  per stack diagram
+    head ROT,"ROT",docode
+        ; x3 is in TOS
+        set a,pop       ; x2
+        set c,pop       ; x1
+        set push,a
+        set push,b
+        set b,c
+        next
+
+;X NIP    x1 x2 -- x2           per stack diagram
+    head NIP,"NIP",docode
+        set a,pop
+        next
+
+;X TUCK   x1 x2 -- x2 x1 x2     per stack diagram
+    head TUCK,"TUCK",docode
+        set a,pop
+        set push,b
+        set push,a
+        next
+
+;C >R    x --   R: -- x   push to return stack
+    head TOR,">R",docode
+        sub x,1
+        set [x],b       ; push TOS onto rtn stk
+        set b,pop	; pop new TOS
+        next
+
+;C R>    -- x    R: x --   pop from return stack
+    head RFROM,"R>",docode
+        set push,b      ; push old TOS
+        set b,[x]       ; pop top rtn stk item
+        add x,1         ;       to TOS
+        next
+
+;C R@    -- x     R: x -- x   fetch from rtn stk
+    head RFETCH,"R@",docode
+        set push,b      ; push old TOS
+        set b,[x]       ; fetch top rtn stk item
+        next
+
+;Z SP@  -- a-addr       get data stack pointer
+    head SPFETCH,"SP@",docode
+        set push,b
+        set b,sp
+        next
+
+;Z SP!  a-addr --       set data stack pointer
+    head SPSTORE,"SP!",docode
+        set sp,b
+        set b,pop       ; get new TOS
+        next
+
+;Z RP@  -- a-addr       get return stack pointer
+    head RPFETCH,"RP@",docode
+        set push,b
+        set b,x
+        next
+
+;Z RP!  a-addr --       set return stack pointer
+    head RPSTORE,"RP!",docode
+        set x,b
+        set b,pop
+        next
+
+; MEMORY AND I/O OPERATIONS =====================
+
+;C !        x a-addr --   store cell in memory
+    head STORE,"!",docode
+        set a,pop	; data
+        set [b],a
+        set b,pop       ; pop new TOS
+        next
+
+;C C!      char c-addr --    store char in memory
+    head CSTORE,"C!",docode
+        set a,pop	; data
+        set [b],a
+        set b,pop       ; pop new TOS
+        next
+
+;C @       a-addr -- x   fetch cell from memory
+    head FETCH,"@",docode
+        set b,[b]
+        next
+
+;C C@     c-addr -- char   fetch char from memory
+    head CFETCH,"C@",docode
+        set b,[b]
+        next
+
+;Z PC!     char c-addr --    output char to port
+;    head PCSTORE,"PC!",docode
+;        pop hl          ; char in L
+;        out (c),l       ; to port (BC)
+;        pop bc          ; pop new TOS
+;        next
+;
+;Z PC@     c-addr -- char   input char from port
+;    head PCFETCH,"PC@",docode
+;        in c,(c)        ; read port (BC) to C
+;        ld b,0
+;        next
+;
+; ARITHMETIC AND LOGICAL OPERATIONS =============
+
+;C +       n1/u1 n2/u2 -- n3/u3     add n1+n2
+    head PLUS,"+",docode
+        add b,pop
+        next
+
+;X M+       d n -- d         add single to double
+    head MPLUS,"M+",docode
+        set c,pop       ; hi cell
+        add peek,b      ; lo cell remains on stack
+        add c,ex
+        set b,c
+        next
+
+;C -      n1/u1 n2/u2 -- n3/u3    subtract n1-n2
+    head MINUS,"-",docode
+        set a,b
+        set b,pop
+        sub b,a
+        next
+
+;C AND    x1 x2 -- x3            logical AND
+    head AND,"AND",docode
+        and b,pop
+        next
+
+;C OR     x1 x2 -- x3           logical OR
+    head OR,"OR",docode
+        bor b,pop
+        next
+
+;C XOR    x1 x2 -- x3            logical XOR
+    head XOR,"XOR",docode
+        xor b,pop
+        next
+
+;C INVERT   x1 -- x2            bitwise inversion
+    head INVERT,"INVERT",docode
+        xor b,-1
+        next
+
+;C NEGATE   x1 -- x2            two's complement
+    head NEGATE,"NEGATE",docode
+        xor b,-1
+        add b,1
+        next
+
+;C 1+      n1/u1 -- n2/u2       add 1 to TOS
+    head ONEPLUS,"1+",docode
+        add b,1
+        next
+
+;C 1-      n1/u1 -- n2/u2     subtract 1 from TOS
+    head ONEMINUS,"1-",docode
+        sub b,1
+        next
+
+;Z ><      x1 -- x2         swap bytes (not ANSI)
+    head swapbytes,"><",docode
+        shl b,8
+        bor b,ex
+        next
+
+;C 2*      x1 -- x2         arithmetic left shift
+    head TWOSTAR,"2*",docode
+        shl b,1
+        next
+
+;C 2/      x1 -- x2        arithmetic right shift
+    head TWOSLASH,"2/",docode
+        asr b,1
+        next
+
+;C LSHIFT  x1 u -- x2    logical L shift u places
+    head LSHIFT,"LSHIFT",docode
+        set a,b	      ; count
+        set b,pop
+        shl b,a
+        next
+
+;C RSHIFT  x1 u -- x2    logical R shift u places
+    head RSHIFT,"RSHIFT",docode
+        set a,b	      ; count
+        set b,pop
+        shr b,a
+        next
+
+;C +!     n/u a-addr --       add cell to memory
+    head PLUSSTORE,"+!",docode
+        add [b],pop
+        set b,pop
+        next
+
+; COMPARISON OPERATIONS =========================
+
+;C 0=     n/u -- flag    return true if TOS=0
+    head ZEROEQUAL,"0=",docode
+        ifn b,0
+          set b,1
+        sub b,1
+        next
+
+;C 0<     n -- flag      true if TOS negative
+    head ZEROLESS,"0<",docode
+        ifu b,0
+          set pc,tostrue
+:tosfalse
+        set b,0
+        next
+:tostrue
+        set b,-1
+        next
+
+;C =      x1 x2 -- flag         test x1=x2
+    head EQUAL,"=",docode
+        ife b,pop
+          set pc,tostrue
+        set pc,tosfalse
+
+;X <>     x1 x2 -- flag    test not eq (not ANSI)
+    head NOTEQUAL,"<>",docolon
+        DW EQUAL,ZEROEQUAL,EXIT
+
+;C <      n1 n2 -- flag        test n1<n2, signed
+    head LESS,"<",docode
+        set a,pop             ; n1
+        ifu a,b
+          set pc,tostrue
+        set pc,tosfalse
+
+;C >     n1 n2 -- flag         test n1>n2, signed
+    head GREATER,">",docolon
+        DW SWOP,LESS,EXIT
+
+;C U<    u1 u2 -- flag       test u1<n2, unsigned
+    head ULESS,"U<",docode
+        ifg b,pop
+          set pc,tostrue
+        set pc,tosfalse
+
+;X U>    u1 u2 -- flag     u1>u2 unsgd (not ANSI)
+    head UGREATER,"U>",docolon
+        DW SWOP,ULESS,EXIT
+
+; LOOP AND BRANCH OPERATIONS ====================
+
+;Z branch   --                  branch always
+    head branch,"branch",docode
+:dobranch set z,[z]     ; get inline value => IP
+        next
+
+;Z ?branch   x --              branch if TOS zero
+    head qbranch,"?branch",docode
+        set a,b
+        set b,pop	; pop new TOS
+        ife a,0
+          set pc,dobranch
+        add z,1		; else skip inline value
+        next
+
+;Z (do)    n1|u1 n2|u2 --  R: -- sys1 sys2
+;Z                          run-time code for DO
+; '83 and ANSI standard loops terminate when the
+; boundary of limit-1 and limit is crossed, in
+; either direction.  This can be conveniently
+; implemented by making the limit 8000h, so that
+; arithmetic overflow logic can detect crossing.
+; I learned this trick from Laxen & Perry F83.
+; fudge factor = 8000h-limit, to be added to
+; the start value.
+    head xdo,"(do)",docode
+        set c,0x8000
+        sub c,pop     ; 0x8000-limit
+        sub x,1
+        set [x],c     ; push as fudge factor
+        add b,c       ; add fudge to start value
+        sub x,1
+        set [x],b     ; push adjusted start value
+        set b,pop
+        next
+
+;Z (loop)   R: sys1 sys2 --  | sys1 sys2
+;Z                        run-time code for LOOP
+; Add 1 to the loop index.  If loop terminates,
+; clean up the return stack and skip the branch.
+; Else take the inline branch.  Note that LOOP
+; terminates when index=8000h.
+    head xloop,"(loop)",docode
+        set a,1           ; the increment
+:loopad add a,[x]         ; get the loop index
+        ife a,0x8000
+          set pc,looptr   ; terminate loop
+        set [x],a         ; save updated index
+        set pc,dobranch   ; continue the loop
+:looptr add x,2           ; discard loop info
+        add z,1           ; skip the inline branch
+        next
+
+;Z (+loop)   n --   R: sys1 sys2 --  | sys1 sys2
+;Z                        run-time code for +LOOP
+; Add n to the loop index.  If loop terminates,
+; clean up the return stack and skip the branch.
+; Else take the inline branch.
+    head xplusloop,"(+loop)",docode
+        set a,b           ; the increment
+        set b,pop         ; get new TOX
+        set pc,loopad
+
+;C I        -- n   R: sys1 sys2 -- sys1 sys2
+;C                  get the innermost loop index
+    head II,"I",docode
+        set push,b        ; push old TOS
+        set b,[x]         ; get loop index
+        sub b,[1+x]       ; subtract fudge factor though
+        next
+
+;C J        -- n   R: 4*sys -- 4*sys
+;C                  get the second loop index
+    head JJ,"J",docode
+        set push,b        ; push old TOS
+        set b,[2+x]       ; get outer loop index
+        sub b,[3+x]       ; subtract fudge factor though
+        next
+
+;C UNLOOP   --   R: sys1 sys2 --  drop loop parms
+    head UNLOOP,"UNLOOP",docode
+        add x,2
+        next
+
+; MULTIPLY AND DIVIDE ===========================
+
+;C UM*     u1 u2 -- ud   unsigned 16x16->32 mult.
+    head UMSTAR,"UM*",docode
+        mul b,pop
+        set push,b
+        set b,ex
+        next
+
+;C UM/MOD   ud u1 -- u2 u3   unsigned 32/16->16
+    head UMSLASHMOD,"UM/MOD",docode
+        set a,pop   ; AC = dividend, B=divisor
+        set c,pop
+        set i,16    ; loop counter
+        shl c,1     ; sets EX to MSB
+:udloop adx a,a     ; rotate
+        ife ex,0
+          set pc,ud16
+:ud17   sub a,b     ; always fits
+        set ex,0
+        set pc,udjoin
+:ud16   sub a,b
+        ife ex,0    ; it fit
+          set pc,udjoin
+        add a,b     ; restore step
+        set ex,1
+:udjoin adx c,c     ; rotate (complemented) result bit in
+        std j,j     ; side effect: decrement i, don't clobber EX
+        ife i,0
+          set pc,udfin
+        set pc,udloop
+:udfin  xor c,-1    ; de-complement quotient
+        set push,a
+        set b,c
+        next
+
+; BLOCK AND STRING OPERATIONS ===================
+
+;C FILL   c-addr u char --  fill memory with char
+    head FILL,"FILL",docode
+        set i,pop
+        set a,pop
+:filoop ife i,0
+          set pc,mdone
+        std [a],b       ; decrements i
+        add a,1
+        set pc,filoop
+:mdone  set b,pop
+        next
+
+;X CMOVE   c-addr1 c-addr2 u --  move from bottom
+; as defined in the ANSI optional String word set
+; On byte machines, CMOVE and CMOVE> are logical
+; factors of MOVE.  They are easy to implement on
+; CPUs which have a block-move instruction.
+    head CMOVE,"CMOVE",docode
+        set i,pop       ; destination address
+        set j,pop       ; source address
+:cmloop ife b,0
+          set pc,mdone
+        sti [i],[j]
+        sub b,1
+        set pc,cmloop
+
+;X CMOVE>  c-addr1 c-addr2 u --  move from top
+; as defined in the ANSI optional String word set
+    head CMOVEUP,"CMOVE>",docode
+        set i,pop       ; destination address
+        add i,b
+        sub i,1
+        set j,pop       ; source address
+        add j,b
+        sub j,1
+:cploop ife b,0
+          set pc,mdone
+        std [i],[j]
+        sub b,1
+        set pc,cploop
+
+;Z SKIP   c-addr u c -- c-addr' u'
+;Z                          skip matching chars
+; Although SKIP, SCAN, and S= are perhaps not the
+; ideal factors of WORD and FIND, they closely
+; follow the string operations available on many
+; CPUs, and so are easy to implement and fast.
+    head skip,"SKIP",docode
+        set c,pop
+        set a,pop
+:skipn  ife c,0
+          set pc,skipd
+        ifn [a],b
+          set pc,skipd
+        add a,1
+        sub c,1
+        set pc,skipn
+:skipd  set push,a
+        set b,c
+        next
+
+;Z SCAN    c-addr u c -- c-addr' u'
+;Z                      find matching char
+    head scan,"SCAN",docode
+        set c,pop
+        set a,pop
+:scann  ife c,0
+          set pc,scand
+        ife [a],b
+          set pc,scand
+        add a,1
+        sub c,1
+        set pc,scann
+:scand  set push,a
+        set b,c
+        next
+
+;Z S=    c-addr1 c-addr2 u -- n   string compare
+;Z             n<0: s1<s2, n=0: s1=s2, n>0: s1>s2
+    head sequal,"S=",docode
+        set j,pop   ; addr2
+        set i,pop   ; addr1
+:sloop  ife b,0
+          set pc,smatch ; by definition, match!
+        set a,[i]
+        sub a,[j]
+        ifn a,0
+          set pc,sdiff
+        sub b,1
+        sti pc,sloop
+:sdiff  asr a,15    ; smear sign bit across A
+        ife a,0
+          add a,1
+        set b,a
+:smatch next
+
+        INCLUDE camel16d ; CPU Dependencies
+        INCLUDE camel16h ; High Level words
+
+:enddict                ; user's code starts here
+
+        ORG $link
+:lastword               ; nfa of last word in dict.
+        ORG enddict
